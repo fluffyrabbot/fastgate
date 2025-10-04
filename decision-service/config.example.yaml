@@ -1,0 +1,54 @@
+server:
+  listen: ":8080"
+  read_timeout_ms: 5000
+  write_timeout_ms: 5000
+
+modes:
+  enforce: true        # if false => Observe mode (always ALLOW; still logs & may issue clearance)
+  fail_open: true      # if rate store fails and true => ALLOW
+  under_attack: false  # if true => add +15 risk and lower thresholds by 10
+
+cookie:
+  name: "Clearance"
+  domain: ""           # empty => no Domain attribute
+  path: "/"
+  max_age_sec: 21600   # 6h
+  same_site: "Lax"     # Lax | None
+  secure: true
+  http_only: true
+
+token:
+  alg: "HS256"
+  issuer: "fastgate"
+  skew_sec: 30
+  keys:
+    v1: "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0LXNlY3JldA"  # base64url secret (example only)
+  current_kid: "v1"
+
+policy:
+  challenge_threshold: 60
+  block_threshold: 85
+  paths:
+    - pattern: "^/login"
+      base: 40
+    - pattern: "^/api/"
+      base: 25
+    - pattern: "^/live"
+      base: 35
+  ip_rps_threshold: 20
+  token_rps_threshold: 30
+  ws_concurrency_limits:
+    per_ip: 20
+    per_token: 40
+
+rate_store:
+  backend: "memory"    # memory | redis
+  redis_dsn: ""
+
+challenge:
+  difficulty_bits: 16  # keep small for dev; raise in prod (e.g., 18-20)
+  ttl_sec: 60
+  max_retries: 2
+
+logging:
+  level: "info"

@@ -1,0 +1,30 @@
+version: "3.9"
+services:
+  origin:
+    build:
+      context: ..
+      dockerfile: deploy/origin.Dockerfile
+    container_name: origin
+    expose:
+      - "8081"
+
+  decision:
+    build:
+      context: ..
+      dockerfile: deploy/decision.Dockerfile
+    container_name: decision
+    environment:
+      - FASTGATE_CONFIG=/app/config.yaml
+    ports:
+      - "8080:8080"
+
+  nginx:
+    build:
+      context: ..
+      dockerfile: deploy/nginx.Dockerfile
+    container_name: fastgate-nginx
+    depends_on:
+      - origin
+      - decision
+    ports:
+      - "8088:8080"

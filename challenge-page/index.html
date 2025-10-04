@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Cache-Control" content="no-store">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Checking your connection…</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 3rem; }
+    .card { max-width: 560px; margin: 8vh auto; padding: 2rem; border: 1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 1px 8px rgba(0,0,0,.04); }
+    .spinner { width:22px;height:22px;border:3px solid #e5e7eb;border-top-color:#374151;border-radius:50%;animation:spin 1s linear infinite;display:inline-block; vertical-align:middle; margin-right:10px;}
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .muted { color:#6b7280; font-size:.92rem; }
+    a { color:#2563eb; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+<body>
+  <div class="card" role="status" aria-live="polite" id="status">
+    <div class="spinner"></div>
+    <strong>Checking your connection…</strong>
+    <p class="muted" id="msg">This usually takes less than a second.</p>
+    <p class="muted" id="fallback" style="display:none;">
+      If this stalls, you can <a id="fallback-link" href="/">continue</a>.
+    </p>
+    <noscript><p>Please enable JavaScript and <a id="noscript-link" href="/">continue</a>.</p></noscript>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
