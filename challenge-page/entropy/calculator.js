@@ -279,6 +279,28 @@ function calculateConfidence(behavioral, hardware) {
 }
 
 /**
+ * Coarsens GPU vendor string to prevent fingerprinting.
+ * @param {string} vendor Raw vendor string
+ * @returns {string} Coarsened vendor category
+ */
+function coarsenVendor(vendor) {
+  const vendorMap = {
+    'nvidia': 'nvidia',
+    'amd': 'amd',
+    'intel': 'intel',
+    'apple': 'apple',
+    'swiftshader': 'swiftshader'
+  };
+
+  for (const [key, value] of Object.entries(vendorMap)) {
+    if (vendor.includes(key)) {
+      return value;
+    }
+  }
+  return 'other';
+}
+
+/**
  * Sanitizes hardware signals for transmission (remove sensitive data).
  * @param {Object} hardware Hardware signals
  * @returns {Object} Sanitized signals
@@ -287,11 +309,7 @@ function sanitizeHardwareSignals(hardware) {
   return {
     webgl: {
       // Coarsen vendor/renderer to prevent fingerprinting
-      vendor: hardware.webgl.vendor.includes('nvidia') ? 'nvidia' :
-              hardware.webgl.vendor.includes('amd') ? 'amd' :
-              hardware.webgl.vendor.includes('intel') ? 'intel' :
-              hardware.webgl.vendor.includes('apple') ? 'apple' :
-              hardware.webgl.vendor.includes('swiftshader') ? 'swiftshader' : 'other',
+      vendor: coarsenVendor(hardware.webgl.vendor),
       consistent: hardware.webgl.consistent
     },
     cores: hardware.cores > 0 ? Math.min(hardware.cores, 16) : -1, // Cap at 16 for privacy

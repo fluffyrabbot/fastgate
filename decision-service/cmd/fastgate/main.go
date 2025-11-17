@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	maxJSONBytes                 = 4 * 1024 // 4KB body cap for challenge endpoints
-	maxChallengeStartsRPSPerIP   = 3.0      // soft guard: ~3 req/sec per IP over 10s window
+	maxJSONBytes                 = 4 * 1024  // 4KB body cap for challenge/nonce endpoint
+	maxEntropyBytes              = 16 * 1024 // 16KB for challenge/complete with entropy data
+	maxChallengeStartsRPSPerIP   = 3.0       // soft guard: ~3 req/sec per IP over 10s window
 	challengeRetryAfterSeconds   = 2        // hint for clients when 429 is returned
 	minClearanceRemaining        = 2 * time.Minute
 	defaultWSLease               = 120 * time.Second
@@ -187,7 +188,7 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, maxEntropyBytes) // Allow larger payloads for entropy data
 		defer r.Body.Close()
 
 		type Req struct {
@@ -207,11 +208,29 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_fields"})
 			return
 		}
+
+		// Validate entropy payload to prevent DoS via unbounded arrays
+		if req.Entropy != nil {
+			const maxAnomalies = 50 // Reasonable upper bound for anomaly counts
+			if len(req.Entropy.Anomalies.Hardware) > maxAnomalies ||
+				len(req.Entropy.Anomalies.Behavioral) > maxAnomalies ||
+				len(req.Entropy.Anomalies.Environment) > maxAnomalies {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too_many_anomalies"})
+				return
+			}
+		}
+
 		retURL := sanitizeReturnURL(req.ReturnURL)
 
 		// Atomically validate and consume
 		ok, reason, _ := chStore.TrySolve(req.ChallengeID, req.Nonce, req.Solution)
 		if !ok {
+			// Debug logging for challenge validation failures
+			if cfg.Logging.Level == "debug" {
+				clientIP := clientIPFromHeaders(r)
+				log.Printf("Challenge validation failed: reason=%s id=%s ip=%s", reason, req.ChallengeID, clientIP)
+			}
+
 			switch reason {
 			case "not_found", "expired":
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})

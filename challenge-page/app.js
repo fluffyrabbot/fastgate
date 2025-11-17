@@ -145,10 +145,7 @@ import { buildEntropyProfile } from './entropy/calculator.js';
         setMsg("Verifying… this should be quick.");
         const solution = await solvePow(String(data.nonce), Number(data.difficulty_bits || 16));
 
-        // 2.5) Collect entropy signals while PoW is solving
-        // (give user a bit more time to interact if they haven't already)
-        await sleep(100);
-
+        // 2.5) Collect entropy signals after PoW completion
         const hardwareSignals = await gatherHardwareSignals();
         const behavioralSignals = behaviorTracker.getSignals();
         const environmentSignals = gatherEnvironmentSignals();

@@ -133,6 +133,17 @@ func (a *Analyzer) Analyze(profile *Profile) *Assessment {
 		}
 	}
 
+	// Defensive initialization: ensure nested slices are non-nil to prevent panics
+	if profile.Anomalies.Hardware == nil {
+		profile.Anomalies.Hardware = []string{}
+	}
+	if profile.Anomalies.Behavioral == nil {
+		profile.Anomalies.Behavioral = []string{}
+	}
+	if profile.Anomalies.Environment == nil {
+		profile.Anomalies.Environment = []string{}
+	}
+
 	reasons := []string{}
 	scorePenalty := 0
 

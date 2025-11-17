@@ -62,6 +62,7 @@ async function getWebGLInfo() {
  * @returns {Promise<boolean>} True if rendering is consistent
  */
 async function testWebGLConsistency(gl) {
+  let vertexShader, fragmentShader, program, buffer;
   try {
     const size = 64;
     const canvas = gl.canvas;
@@ -69,7 +70,7 @@ async function testWebGLConsistency(gl) {
     canvas.height = size;
 
     // Simple shader pair
-    const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+    vertexShader = gl.createShader(gl.VERTEX_SHADER);
     gl.shaderSource(vertexShader, `
       attribute vec2 position;
       void main() {
@@ -78,7 +79,7 @@ async function testWebGLConsistency(gl) {
     `);
     gl.compileShader(vertexShader);
 
-    const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
     gl.shaderSource(fragmentShader, `
       precision mediump float;
       void main() {
@@ -87,14 +88,14 @@ async function testWebGLConsistency(gl) {
     `);
     gl.compileShader(fragmentShader);
 
-    const program = gl.createProgram();
+    program = gl.createProgram();
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
     gl.linkProgram(program);
     gl.useProgram(program);
 
     // Create a simple triangle
-    const buffer = gl.createBuffer();
+    buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
       -0.5, -0.5,
@@ -131,6 +132,12 @@ async function testWebGLConsistency(gl) {
     return samples[0] === samples[1] && samples[1] === samples[2];
   } catch (e) {
     return false;
+  } finally {
+    // Cleanup WebGL resources to prevent memory leak
+    if (buffer) gl.deleteBuffer(buffer);
+    if (program) gl.deleteProgram(program);
+    if (fragmentShader) gl.deleteShader(fragmentShader);
+    if (vertexShader) gl.deleteShader(vertexShader);
   }
 }
 
@@ -148,7 +155,7 @@ function getCores() {
  * @returns {Promise<number>} Jitter variance in milliseconds
  */
 async function measureEventLoopJitter() {
-  const samples = 20;
+  const samples = 10; // Reduced from 20 to minimize blocking time
   const delays = [];
 
   for (let i = 0; i < samples; i++) {
@@ -172,7 +179,7 @@ async function measureEventLoopJitter() {
  */
 async function measureRAFVariance() {
   return new Promise((resolve) => {
-    const samples = 30;
+    const samples = 15; // Reduced from 30 to minimize blocking time (~250ms at 60fps)
     const timestamps = [];
     let count = 0;
 

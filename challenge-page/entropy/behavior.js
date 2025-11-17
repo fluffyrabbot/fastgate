@@ -75,7 +75,7 @@ export class BehaviorTracker {
 
       // Keep only last 100 points
       if (this.mousePoints.length > 100) {
-        this.mousePoints.shift();
+        this.mousePoints = this.mousePoints.slice(-100);
       }
     }
   };
@@ -95,7 +95,7 @@ export class BehaviorTracker {
 
     // Keep only last 50 keystrokes
     if (this.keystrokes.length > 50) {
-      this.keystrokes.shift();
+      this.keystrokes = this.keystrokes.slice(-50);
     }
   };
 
@@ -109,7 +109,7 @@ export class BehaviorTracker {
     });
 
     if (this.keystrokes.length > 50) {
-      this.keystrokes.shift();
+      this.keystrokes = this.keystrokes.slice(-50);
     }
   };
 
@@ -128,7 +128,7 @@ export class BehaviorTracker {
 
       // Keep only last 20 scroll events
       if (this.scrollEvents.length > 20) {
-        this.scrollEvents.shift();
+        this.scrollEvents = this.scrollEvents.slice(-20);
       }
     }
   };
@@ -148,7 +148,7 @@ export class BehaviorTracker {
 
     // Keep only last 20 clicks
     if (this.clicks.length > 20) {
-      this.clicks.shift();
+      this.clicks = this.clicks.slice(-20);
     }
   };
 
@@ -167,7 +167,7 @@ export class BehaviorTracker {
       });
 
       if (this.clicks.length > 20) {
-        this.clicks.shift();
+        this.clicks = this.clicks.slice(-20);
       }
     }
   };
@@ -183,7 +183,7 @@ export class BehaviorTracker {
       });
 
       if (this.mousePoints.length > 100) {
-        this.mousePoints.shift();
+        this.mousePoints = this.mousePoints.slice(-100);
       }
     }
   };
