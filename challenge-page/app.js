@@ -1,3 +1,9 @@
+// Import entropy modules
+import { gatherHardwareSignals } from './entropy/hardware.js';
+import { BehaviorTracker } from './entropy/behavior.js';
+import { gatherEnvironmentSignals } from './entropy/environment.js';
+import { buildEntropyProfile } from './entropy/calculator.js';
+
 (function () {
   // ----- small helpers -----
   function qs(name, urlStr) {
@@ -15,6 +21,10 @@
     var a = $("fallback-link"); if (a) a.href = u || "/";
     var b = $("noscript-link"); if (b) b.href = u || "/";
   }
+
+  // Initialize behavior tracker early to capture all interactions
+  const behaviorTracker = new BehaviorTracker();
+  behaviorTracker.start();
 
   // Ensure we have WebCrypto
   if (!window.crypto || !window.crypto.subtle) {
@@ -135,6 +145,24 @@
         setMsg("Verifying… this should be quick.");
         const solution = await solvePow(String(data.nonce), Number(data.difficulty_bits || 16));
 
+        // 2.5) Collect entropy signals while PoW is solving
+        // (give user a bit more time to interact if they haven't already)
+        await sleep(100);
+
+        const hardwareSignals = await gatherHardwareSignals();
+        const behavioralSignals = behaviorTracker.getSignals();
+        const environmentSignals = gatherEnvironmentSignals();
+
+        // Build entropy profile
+        const entropyProfile = buildEntropyProfile(
+          hardwareSignals,
+          behavioralSignals,
+          environmentSignals
+        );
+
+        // Stop tracking (cleanup)
+        behaviorTracker.stop();
+
         // 3) Complete challenge (issue clearance) and follow redirect
         const compRes = await postJSON("/v1/challenge/complete", {
           challenge_id: String(data.challenge_id),
@@ -147,7 +175,8 @@
             platform: navigator.platform || "",
             hardwareConcurrency: navigator.hardwareConcurrency || 0,
             vendor: navigator.vendor || ""
-          }
+          },
+          entropy: entropyProfile
         });
 
         // Some proxies respond 302; fetch may follow or not. Respect Location header either way.

@@ -15,6 +15,7 @@ import (
 	"fastgate/decision-service/internal/authz"
 	"fastgate/decision-service/internal/challenge"
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/entropy"
 	"fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
@@ -190,11 +191,12 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 		defer r.Body.Close()
 
 		type Req struct {
-			ChallengeID string         `json:"challenge_id"`
-			Nonce       string         `json:"nonce"`
-			Solution    uint32         `json:"solution"`
-			ReturnURL   string         `json:"return_url"`
-			UAHints     map[string]any `json:"ua_hints"`
+			ChallengeID string                `json:"challenge_id"`
+			Nonce       string                `json:"nonce"`
+			Solution    uint32                `json:"solution"`
+			ReturnURL   string                `json:"return_url"`
+			UAHints     map[string]any        `json:"ua_hints"`
+			Entropy     *entropy.Profile      `json:"entropy,omitempty"`
 		}
 		var req Req
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -226,14 +228,44 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 			}
 		}
 
-		// Success — issue clearance cookie and redirect to return_url
-		tokenStr, err := kr.Sign("low", cfg.CookieMaxAge())
+		// Success — analyze entropy and issue clearance cookie
+		tier := "low" // Default tier for PoW completion
+
+		// Analyze entropy if provided
+		if req.Entropy != nil {
+			analyzer := entropy.NewAnalyzer()
+			assessment := analyzer.Analyze(req.Entropy)
+
+			if cfg.Logging.Level == "debug" {
+				log.Printf("Entropy assessment: bot=%.2f confidence=%.2f suspicious=%v reasons=%v",
+					assessment.BotScore, assessment.Confidence, assessment.IsSuspicious, assessment.Reasons)
+			}
+
+			// Upgrade tier if low bot score and high confidence
+			if !assessment.IsSuspicious && assessment.Confidence >= 0.5 {
+				tier = "medium" // Upgrade to medium for human-like behavior
+			}
+
+			// Downgrade tier if high bot score
+			if assessment.IsBot {
+				tier = "low" // Keep low tier for bot-like behavior
+				if cfg.Logging.Level == "debug" {
+					log.Printf("Bot detected (score=%.2f): %v", assessment.BotScore, assessment.Reasons)
+				}
+			}
+		}
+
+		tokenStr, err := kr.Sign(tier, cfg.CookieMaxAge())
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 			return
 		}
 		http.SetCookie(w, buildCookie(cfg, tokenStr))
 		metrics.ChallengeSolved.Inc()
+
+		if cfg.Logging.Level == "debug" {
+			log.Printf("Clearance issued: tier=%s", tier)
+		}
 
 		if retURL == "" {
 			retURL = "/"
