@@ -121,21 +121,3 @@ func (s *Store) Consume(id string) {
 	}
 }
 
-// GC removes expired entries (best-effort cleanup).
-func (s *Store) GC() {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for el := s.lru.Back(); el != nil; {
-		prev := el.Prev()
-		en := el.Value.(*entry)
-
-		if now.After(en.expiresAt) {
-			delete(s.data, en.id)
-			s.lru.Remove(el)
-		}
-
-		el = prev
-	}
-}

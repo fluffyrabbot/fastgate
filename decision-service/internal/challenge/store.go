@@ -197,22 +197,6 @@ func (s *Store) TrySolve(id, nonceB64 string, solution uint32) (bool, string, er
 	return false, "invalid_solution", nil
 }
 
-// GC removes expired entries (best-effort).
-func (s *Store) GC() {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for el := s.lru.Back(); el != nil; {
-		prev := el.Prev()
-		en := el.Value.(*entry)
-		if now.After(en.it.ExpiresAt) {
-			delete(s.data, en.id)
-			s.lru.Remove(el)
-		}
-		el = prev
-	}
-}
-
 // ----- internals -----
 
 type entry struct {
