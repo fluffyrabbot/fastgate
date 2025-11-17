@@ -47,13 +47,17 @@ func NewStoreWithCapacity(ttl time.Duration, capacity int) *Store {
 }
 
 // Put stores a WebAuthn session and returns a unique challenge ID.
+// Returns empty string if random generation fails.
 func (s *Store) Put(session *webauthn.SessionData, userID []byte, returnURL string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Generate unique ID
 	idBytes := make([]byte, 16)
-	rand.Read(idBytes)
+	if _, err := rand.Read(idBytes); err != nil {
+		// Critical failure: cannot generate secure random ID
+		return ""
+	}
 	id := base64.RawURLEncoding.EncodeToString(idBytes)
 
 	// Evict LRU if at capacity

@@ -74,6 +74,7 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 	// Threat Intelligence (if enabled)
 	var intelStore *intel.Store
 	var taxiiServer *intel.TAXIIServer
+	var pollers []*intel.Poller
 	if cfg.ThreatIntel.Enabled {
 		intelStore = intel.NewStore(cfg.ThreatIntel.CacheCapacity)
 
@@ -89,6 +90,7 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 				pollInterval = 30 * time.Second
 			}
 			poller := intel.NewPoller(client, intelStore, peer.CollectionID, pollInterval)
+			pollers = append(pollers, poller)
 			go poller.Start()
 			log.Printf("Threat intel: polling %s every %v", peer.Name, pollInterval)
 		}
@@ -99,6 +101,16 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 
 		log.Printf("Threat intel enabled (peers: %d, cache: %d)", len(cfg.ThreatIntel.Peers), cfg.ThreatIntel.CacheCapacity)
 	}
+
+	// Ensure cleanup on shutdown
+	defer func() {
+		for _, p := range pollers {
+			p.Stop()
+		}
+		if intelStore != nil {
+			intelStore.Close()
+		}
+	}()
 
 	mux := http.NewServeMux()
 

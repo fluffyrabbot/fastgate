@@ -3,6 +3,7 @@ package intel
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -98,7 +99,9 @@ func (s *TAXIIServer) HandleCollections(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/taxii+json;version=2.1")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("ERROR: JSON encode failed in HandleCollections: %v", err)
+	}
 }
 
 // HandleObjects handles GET /taxii2/collections/{id}/objects/
@@ -130,11 +133,18 @@ func (s *TAXIIServer) HandleObjects(w http.ResponseWriter, r *http.Request) {
 		filteredBundles = s.bundles
 	}
 
-	// Merge all bundles into one response
-	mergedObjects := make([]SimpleSTIXIndicator, 0)
+	// Merge all bundles into one response with limit to prevent memory exhaustion
+	const maxObjectsPerResponse = 10000
+	mergedObjects := make([]SimpleSTIXIndicator, 0, maxObjectsPerResponse)
 	for _, entry := range filteredBundles {
-		mergedObjects = append(mergedObjects, entry.bundle.Objects...)
+		for _, obj := range entry.bundle.Objects {
+			if len(mergedObjects) >= maxObjectsPerResponse {
+				goto done
+			}
+			mergedObjects = append(mergedObjects, obj)
+		}
 	}
+done:
 
 	responseBundle := &SimpleSTIXBundle{
 		Type:    "bundle",
@@ -143,5 +153,7 @@ func (s *TAXIIServer) HandleObjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/taxii+json;version=2.1")
-	json.NewEncoder(w).Encode(responseBundle)
+	if err := json.NewEncoder(w).Encode(responseBundle); err != nil {
+		log.Printf("ERROR: JSON encode failed in HandleObjects: %v", err)
+	}
 }

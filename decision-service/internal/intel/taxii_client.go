@@ -1,10 +1,12 @@
 package intel
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -24,15 +26,25 @@ func NewTAXIIClient(baseURL, username, password string) *TAXIIClient {
 		Password: password,
 		HTTPClient: &http.Client{
 			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+				},
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
 	}
 }
 
 // FetchIndicators fetches indicators from a TAXII collection
 func (c *TAXIIClient) FetchIndicators(collectionID string, addedAfter time.Time) ([]byte, error) {
-	url := fmt.Sprintf("%s/taxii2/collections/%s/objects/", c.BaseURL, collectionID)
+	// Escape collection ID to prevent path traversal
+	escapedID := url.PathEscape(collectionID)
+	reqURL := fmt.Sprintf("%s/taxii2/collections/%s/objects/", c.BaseURL, escapedID)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +74,10 @@ func (c *TAXIIClient) FetchIndicators(collectionID string, addedAfter time.Time)
 		return nil, fmt.Errorf("TAXII server returned %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	// Limit response size to prevent memory exhaustion (50MB max)
+	const maxTAXIIResponseSize = 50 * 1024 * 1024
+	limitedReader := io.LimitReader(resp.Body, maxTAXIIResponseSize)
+	return io.ReadAll(limitedReader)
 }
 
 // ListCollections lists available TAXII collections

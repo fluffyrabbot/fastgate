@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -136,7 +137,10 @@ func CreateBundle(indicators []*Indicator) ([]byte, error) {
 
 // toSimpleSTIXIndicator converts our internal indicator to STIX format
 func toSimpleSTIXIndicator(ind *Indicator) SimpleSTIXIndicator {
-	pattern := fmt.Sprintf("[%s:value = '%s']", ind.Type, ind.Value)
+	// Escape single quotes in value to prevent STIX pattern injection
+	escapedValue := strings.ReplaceAll(ind.Value, "'", "\\'")
+	escapedValue = strings.ReplaceAll(escapedValue, "]", "\\]")
+	pattern := fmt.Sprintf("[%s:value = '%s']", ind.Type, escapedValue)
 
 	return SimpleSTIXIndicator{
 		Type:        "indicator",

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"fastgate/decision-service/internal/config"
@@ -62,6 +64,10 @@ func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body size to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 4*1024) // 4KB limit
+	defer r.Body.Close()
+
 	// Parse request
 	type Req struct {
 		ReturnURL string `json:"return_url"`
@@ -71,6 +77,9 @@ func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
 		return
 	}
+
+	// Sanitize return URL to prevent open redirects
+	req.ReturnURL = sanitizeReturnURL(req.ReturnURL)
 
 	// Create ephemeral user
 	user, err := NewEphemeralUser()
@@ -90,6 +99,11 @@ func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 
 	// Store session
 	challengeID := h.Store.Put(session, user.ID, req.ReturnURL)
+	if challengeID == "" {
+		log.Printf("webauthn: failed to generate challenge ID")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
+	}
 
 	// Build response (standard WebAuthn CredentialCreationOptions plus our challenge_id)
 	resp := struct {
@@ -113,10 +127,14 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get challenge_id from query parameter
+	// Limit request body size to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 1*1024*1024) // 1MB limit for attestation
+	defer r.Body.Close()
+
+	// Get challenge_id from query parameter with length validation
 	challengeID := r.URL.Query().Get("challenge_id")
-	if challengeID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_challenge_id"})
+	if challengeID == "" || len(challengeID) > 256 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_challenge_id"})
 		return
 	}
 
@@ -173,7 +191,8 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 	// Set cookie
 	http.SetCookie(w, buildCookie(h.Config, tokenStr))
 
-	// Redirect to return URL
+	// Sanitize and redirect to return URL
+	returnURL = sanitizeReturnURL(returnURL)
 	if returnURL == "" {
 		returnURL = "/"
 	}
@@ -228,5 +247,32 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.WriteHeader(code)
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(true)
-	_ = enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		log.Printf("ERROR: JSON encode failed: %v", err)
+	}
+}
+
+// sanitizeReturnURL prevents open redirect attacks by restricting to same-origin paths.
+// Accepts: "/", "/path", "/path?query", but NOT "//host", "http://", "https://".
+func sanitizeReturnURL(in string) string {
+	if in == "" {
+		return "/"
+	}
+	// Quick rejects
+	if strings.HasPrefix(in, "//") || strings.HasPrefix(in, "http://") || strings.HasPrefix(in, "https://") {
+		return "/"
+	}
+	u, err := url.ParseRequestURI(in)
+	if err != nil {
+		return "/"
+	}
+	if !strings.HasPrefix(u.Path, "/") {
+		return "/"
+	}
+	// Keep path + raw query; drop fragments (browsers keep them client-side anyway)
+	out := u.Path
+	if u.RawQuery != "" {
+		out += "?" + u.RawQuery
+	}
+	return out
 }

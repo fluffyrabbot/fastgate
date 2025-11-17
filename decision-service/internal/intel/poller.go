@@ -2,6 +2,7 @@ package intel
 
 import (
 	"log"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,7 @@ type Poller struct {
 	CollectionID string
 	Interval     time.Duration
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 }
 
 // NewPoller creates a new TAXII poller
@@ -45,9 +47,11 @@ func (p *Poller) Start() {
 	}
 }
 
-// Stop stops the polling loop
+// Stop stops the polling loop (idempotent - safe to call multiple times)
 func (p *Poller) Stop() {
-	close(p.stopCh)
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+	})
 }
 
 // poll fetches and processes indicators
