@@ -31,7 +31,3 @@ func (i *Indicator) IsExpired() bool {
 }
 
 // IsActive checks if the indicator is currently active
-func (i *Indicator) IsActive() bool {
-	now := time.Now()
-	return now.After(i.ValidFrom) && now.Before(i.ValidUntil)
-}

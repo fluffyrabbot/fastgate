@@ -1,7 +1,6 @@
 package entropy
 
 import (
-	"math"
 )
 
 // Profile represents the complete entropy profile from the client.
@@ -242,21 +241,3 @@ func (a *Analyzer) findCriticalAnomalies(profile *Profile) []string {
 
 // CalculateEntropyScore computes a simple entropy score from an entropy profile.
 // Returns 0-100, where higher = more suspicious.
-func CalculateEntropyScore(profile *Profile) int {
-	if profile == nil {
-		return 0
-	}
-
-	// Weight bot score heavily (70%)
-	botScore := profile.Scores.Bot * 70
-
-	// Weight anomaly count moderately (20%)
-	anomalyScore := math.Min(float64(profile.Anomalies.Total)*4, 20)
-
-	// Weight low entropy (10%)
-	avgEntropy := (profile.Entropy.Mouse + profile.Entropy.Timing + profile.Entropy.Interaction) / 3.0
-	entropyScore := (1.0 - avgEntropy/5.0) * 10
-
-	total := botScore + anomalyScore + entropyScore
-	return int(math.Min(total, 100))
-}

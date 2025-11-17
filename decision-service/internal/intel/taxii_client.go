@@ -3,7 +3,6 @@ package intel
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,36 +81,6 @@ func (c *TAXIIClient) FetchIndicators(ctx context.Context, collectionID string, 
 }
 
 // ListCollections lists available TAXII collections
-func (c *TAXIIClient) ListCollections() ([]Collection, error) {
-	url := fmt.Sprintf("%s/taxii2/collections/", c.BaseURL)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if c.Username != "" {
-		req.SetBasicAuth(c.Username, c.Password)
-	}
-
-	req.Header.Set("Accept", "application/taxii+json;version=2.1")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Collections []Collection `json:"collections"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	return result.Collections, nil
-}
 
 // Collection represents a TAXII collection
 type Collection struct {

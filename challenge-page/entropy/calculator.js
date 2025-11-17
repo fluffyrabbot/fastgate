@@ -376,30 +376,3 @@ function sanitizeEnvironmentSignals(environment) {
  * @param {Object} profile Entropy profile
  * @returns {string} Summary text
  */
-export function summarizeProfile(profile) {
-  const botPercent = Math.round(profile.scores.bot * 100);
-  const humanPercent = Math.round(profile.scores.human * 100);
-  const confidence = Math.round(profile.scores.confidence * 100);
-
-  let summary = `Bot Likelihood: ${botPercent}% (Human: ${humanPercent}%, Confidence: ${confidence}%)\n`;
-
-  if (profile.anomalies.total > 0) {
-    summary += `Detected ${profile.anomalies.total} anomalies:\n`;
-    if (profile.anomalies.hardware.length > 0) {
-      summary += `  Hardware: ${profile.anomalies.hardware.join(', ')}\n`;
-    }
-    if (profile.anomalies.behavioral.length > 0) {
-      summary += `  Behavioral: ${profile.anomalies.behavioral.join(', ')}\n`;
-    }
-    if (profile.anomalies.environment.length > 0) {
-      summary += `  Environment: ${profile.anomalies.environment.join(', ')}\n`;
-    }
-  }
-
-  summary += `\nEntropy Scores:\n`;
-  summary += `  Mouse: ${profile.entropy.mouse.toFixed(2)}/5\n`;
-  summary += `  Timing: ${profile.entropy.timing.toFixed(2)}/5\n`;
-  summary += `  Interaction: ${profile.entropy.interaction.toFixed(2)}/5\n`;
-
-  return summary;
-}

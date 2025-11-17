@@ -385,25 +385,10 @@ func (h *Handler) wsTokKey(tok string) string {
 // ---- Response/headers & cookie helpers ----
 
 func setReasonHeaders(w http.ResponseWriter, reasons []string, score int) {
-	// Optimize: avoid strings.Join allocation for common cases
-	switch len(reasons) {
-	case 0:
+	if len(reasons) == 0 {
 		w.Header().Set("X-FastGate-Reason", "unspecified")
-	case 1:
-		w.Header().Set("X-FastGate-Reason", reasons[0])
-	case 2:
-		w.Header().Set("X-FastGate-Reason", reasons[0]+","+reasons[1])
-	default:
-		// For 3+ reasons, use strings.Builder
-		var sb strings.Builder
-		sb.Grow(len(reasons) * 16) // estimate
-		for i, r := range reasons {
-			if i > 0 {
-				sb.WriteByte(',')
-			}
-			sb.WriteString(r)
-		}
-		w.Header().Set("X-FastGate-Reason", sb.String())
+	} else {
+		w.Header().Set("X-FastGate-Reason", strings.Join(reasons, ","))
 	}
 	w.Header().Set("X-FastGate-Score", strconv.Itoa(score))
 }

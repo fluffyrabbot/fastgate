@@ -98,18 +98,6 @@ func (s *Store) Check(typ IndicatorType, value string) (*Indicator, bool) {
 }
 
 // Stats returns statistics about the store
-func (s *Store) Stats() map[string]int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	stats := make(map[string]int)
-	for typ, m := range s.byType {
-		stats[string(typ)] = len(m)
-	}
-	stats["total"] = s.lru.Len()
-	return stats
-}
-
 // Close stops the background GC loop
 func (s *Store) Close() {
 	close(s.stopCh)

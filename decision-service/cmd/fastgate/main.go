@@ -31,8 +31,6 @@ const (
 	maxEntropyBytes              = 16 * 1024 // 16KB for challenge/complete with entropy data
 	maxChallengeStartsRPSPerIP   = 3.0       // soft guard: ~3 req/sec per IP over 10s window
 	challengeRetryAfterSeconds   = 2        // hint for clients when 429 is returned
-	minClearanceRemaining        = 2 * time.Minute
-	defaultWSLease               = 120 * time.Second
 	defaultChallengeStoreCap     = 100_000 // (used implicitly by Store's default)
 )
 
@@ -59,13 +57,6 @@ func main() {
 	}
 	authzHandler := authz.NewHandler(cfg, kr)
 
-// Production attestation via redemption service (if enabled and dev not forced)
-// TODO: Implement Privacy Pass attestation
-/*
-if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Attestation.Provider == "privpass" {
-    log.Printf("Attestation enabled but not yet implemented (provider=%s)", cfg.Attestation.Provider)
-}
-*/
 
 	// Challenge store (bounded LRU inside; default capacity).
 	chStore := challenge.NewStore(time.Duration(cfg.Challenge.TTLSec) * time.Second)
