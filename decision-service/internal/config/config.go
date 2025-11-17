@@ -122,6 +122,7 @@ type ThreatIntelCfg struct {
 }
 
 type Config struct {
+	Version     string           `yaml:"version"`      // Config schema version (e.g., "v1")
 	Server      ServerCfg        `yaml:"server"`
 	Modes       ModesCfg         `yaml:"modes"`
 	Cookie      CookieCfg        `yaml:"cookie"`
@@ -144,7 +145,16 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
-	// defaults
+
+	// Version defaults and validation
+	if cfg.Version == "" {
+		cfg.Version = "v1" // Default for backward compatibility
+	}
+	if cfg.Version != "v1" {
+		return nil, fmt.Errorf("unsupported config version: %s (expected v1)", cfg.Version)
+	}
+
+	// Server defaults
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8080"
 	}
@@ -212,28 +222,28 @@ func (c *Config) CookieMaxAge() time.Duration {
 func (c *Config) Validate() error {
 	// Server timeout validation (protect against Slowloris)
 	if c.Server.ReadTimeoutMs <= 0 || c.Server.ReadTimeoutMs > 60000 {
-		return errors.New("server.read_timeout_ms must be in (0, 60000]")
+		return fmt.Errorf("server.read_timeout_ms must be in (0, 60000], got %d", c.Server.ReadTimeoutMs)
 	}
 	if c.Server.WriteTimeoutMs <= 0 || c.Server.WriteTimeoutMs > 300000 {
-		return errors.New("server.write_timeout_ms must be in (0, 300000]")
+		return fmt.Errorf("server.write_timeout_ms must be in (0, 300000], got %d", c.Server.WriteTimeoutMs)
 	}
 
 	// Policy thresholds
 	if c.Policy.BlockThreshold <= c.Policy.ChallengeThreshold {
-		return errors.New("policy.block_threshold must be > challenge_threshold")
+		return fmt.Errorf("policy.block_threshold (%d) must be > challenge_threshold (%d)", c.Policy.BlockThreshold, c.Policy.ChallengeThreshold)
 	}
 	if c.Policy.ChallengeThreshold < 0 || c.Policy.BlockThreshold < 0 {
-		return errors.New("policy thresholds must be non-negative")
+		return fmt.Errorf("policy thresholds must be non-negative, got challenge=%d block=%d", c.Policy.ChallengeThreshold, c.Policy.BlockThreshold)
 	}
 	if c.Policy.WSConcurrency.PerIP < 0 || c.Policy.WSConcurrency.PerToken < 0 {
-		return errors.New("ws_concurrency_limits must be >= 0")
+		return fmt.Errorf("ws_concurrency_limits must be >= 0, got per_ip=%d per_token=%d", c.Policy.WSConcurrency.PerIP, c.Policy.WSConcurrency.PerToken)
 	}
 
 	// Cookie validation
 	switch strings.ToLower(c.Cookie.SameSite) {
 	case "lax", "none":
 	default:
-		return errors.New("cookie.same_site must be 'Lax' or 'None'")
+		return fmt.Errorf("cookie.same_site must be 'Lax' or 'None', got %q", c.Cookie.SameSite)
 	}
 	// Cookie domain validation: must be empty or start with a dot or be a valid hostname
 	if c.Cookie.Domain != "" {
@@ -247,13 +257,13 @@ func (c *Config) Validate() error {
 
 	// Challenge validation
 	if c.Challenge.DifficultyBits < 12 || c.Challenge.DifficultyBits > 26 {
-		return errors.New("challenge.difficulty_bits must be between 12 and 26")
+		return fmt.Errorf("challenge.difficulty_bits must be between 12 and 26, got %d", c.Challenge.DifficultyBits)
 	}
 	if c.Challenge.TTLSec <= 0 || c.Challenge.TTLSec > 300 {
-		return errors.New("challenge.ttl_sec must be in (0, 300]")
+		return fmt.Errorf("challenge.ttl_sec must be in (0, 300], got %d", c.Challenge.TTLSec)
 	}
 	if c.Challenge.MaxRetries < 0 || c.Challenge.MaxRetries > 5 {
-		return errors.New("challenge.max_retries must be in [0,5]")
+		return fmt.Errorf("challenge.max_retries must be in [0,5], got %d", c.Challenge.MaxRetries)
 	}
 
 	// Token validation

@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -17,6 +15,7 @@ import (
 	"fastgate/decision-service/internal/authz"
 	"fastgate/decision-service/internal/challenge"
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
@@ -38,7 +37,12 @@ const (
 func main() {
 	cfgPath := os.Getenv("FASTGATE_CONFIG")
 	if cfgPath == "" {
-		cfgPath = "./config.example.yaml"
+		// Try config.yaml first, fall back to config.example.yaml
+		cfgPath = "./config.yaml"
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			log.Printf("No config file found at %s, using config.example.yaml", cfgPath)
+			cfgPath = "./config.example.yaml"
+		}
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -262,6 +266,10 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 	metrics.MustRegister()
 	mux.Handle("/metrics", promhttp.Handler())
 
+	// Log feature state summary
+	log.Printf("Feature configuration: enforce=%v fail_open=%v under_attack=%v webauthn=%v threat_intel=%v",
+		cfg.Modes.Enforce, cfg.Modes.FailOpen, cfg.Modes.UnderAttack, cfg.WebAuthn.Enabled, cfg.ThreatIntel.Enabled)
+
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
 		Handler:           withCommonHeaders(mux),
@@ -322,56 +330,12 @@ func withCommonHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(true)
-	_ = enc.Encode(v)
-}
-
-// Restrict return_url to same-origin paths to prevent open redirects.
-// Accepts: "/", "/path", "/path?query", but NOT "//host", "http://", "https://".
-func sanitizeReturnURL(in string) string {
-	if in == "" {
-		return "/"
-	}
-	// Quick rejects
-	if strings.HasPrefix(in, "//") || strings.HasPrefix(in, "http://") || strings.HasPrefix(in, "https://") {
-		return "/"
-	}
-	u, err := url.ParseRequestURI(in)
-	if err != nil {
-		return "/"
-	}
-	if !strings.HasPrefix(u.Path, "/") {
-		return "/"
-	}
-	// Keep path + raw query; drop fragments (browsers keep them client-side anyway)
-	out := u.Path
-	if u.RawQuery != "" {
-		out += "?" + u.RawQuery
-	}
-	return out
-}
-
-func clientIPFromHeaders(r *http.Request) string {
-	// Prefer the left-most IP in X-Forwarded-For, then fall back to RemoteAddr
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			cand := strings.TrimSpace(parts[0])
-			if ip := net.ParseIP(cand); ip != nil {
-				return ip.String()
-			}
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && net.ParseIP(host) != nil {
-		return host
-	}
-	return ""
-}
+// Use httputil package for shared helpers
+var (
+	writeJSON           = httputil.WriteJSON
+	sanitizeReturnURL   = httputil.SanitizeReturnURL
+	clientIPFromHeaders = httputil.ClientIPFromHeaders
+)
 
 // responseRecorder for observe mode in /v1/authz wrapper.
 type responseRecorder struct{ h http.Header }

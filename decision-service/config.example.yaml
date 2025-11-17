@@ -1,3 +1,5 @@
+version: v1
+
 server:
   listen: ":8080"
   read_timeout_ms: 5000

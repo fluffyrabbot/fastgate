@@ -234,9 +234,12 @@ func bytesEq(a, b []byte) bool {
 
 // validateSolution: SHA256(nonce || uint32_be(solution)) has >= bits leading zero bits.
 func validateSolution(nonce []byte, bits int, solution uint32) bool {
-	data := make([]byte, 0, len(nonce)+4)
-	data = append(data, nonce...)
-	data = append(data, byte(solution>>24), byte(solution>>16), byte(solution>>8), byte(solution))
+	data := make([]byte, len(nonce)+4)
+	copy(data, nonce)
+	data[len(nonce)] = byte(solution >> 24)
+	data[len(nonce)+1] = byte(solution >> 16)
+	data[len(nonce)+2] = byte(solution >> 8)
+	data[len(nonce)+3] = byte(solution)
 	h := sha256.Sum256(data)
 	return LeadingZeroBits(h[:]) >= bits
 }

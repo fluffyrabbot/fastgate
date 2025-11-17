@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
@@ -270,57 +268,9 @@ func buildCookie(cfg *config.Config, tokenStr string) *http.Cookie {
 	return c
 }
 
-// writeJSON writes a JSON response.
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(true)
-	if err := enc.Encode(v); err != nil {
-		log.Printf("ERROR: JSON encode failed: %v", err)
-	}
-}
-
-// sanitizeReturnURL prevents open redirect attacks by restricting to same-origin paths.
-// Accepts: "/", "/path", "/path?query", but NOT "//host", "http://", "https://".
-func sanitizeReturnURL(in string) string {
-	if in == "" {
-		return "/"
-	}
-	// Quick rejects
-	if strings.HasPrefix(in, "//") || strings.HasPrefix(in, "http://") || strings.HasPrefix(in, "https://") {
-		return "/"
-	}
-	u, err := url.ParseRequestURI(in)
-	if err != nil {
-		return "/"
-	}
-	if !strings.HasPrefix(u.Path, "/") {
-		return "/"
-	}
-	// Keep path + raw query; drop fragments (browsers keep them client-side anyway)
-	out := u.Path
-	if u.RawQuery != "" {
-		out += "?" + u.RawQuery
-	}
-	return out
-}
-
-// clientIPFromHeaders extracts the client IP from request headers.
-func clientIPFromHeaders(r *http.Request) string {
-	// Prefer the left-most IP in X-Forwarded-For, then fall back to RemoteAddr
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			cand := strings.TrimSpace(parts[0])
-			if ip := net.ParseIP(cand); ip != nil {
-				return ip.String()
-			}
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && net.ParseIP(host) != nil {
-		return host
-	}
-	return ""
-}
+// Use httputil package for shared helpers
+var (
+	writeJSON           = httputil.WriteJSON
+	sanitizeReturnURL   = httputil.SanitizeReturnURL
+	clientIPFromHeaders = httputil.ClientIPFromHeaders
+)

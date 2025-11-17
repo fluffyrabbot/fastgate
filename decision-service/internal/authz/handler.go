@@ -2,11 +2,14 @@ package authz
 
 import (
 	"fmt"
+	"hash"
 	"hash/fnv"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fastgate/decision-service/internal/config"
@@ -15,6 +18,11 @@ import (
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
 )
+
+// Pool for hash.Hash64 to reduce allocations in WebSocket path
+var hashPool = sync.Pool{
+	New: func() interface{} { return fnv.New64a() },
+}
 
 type Handler struct {
 	Cfg        *config.Config
@@ -57,6 +65,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse headers once to avoid repeated lookups
 	method := r.Header.Get("X-Original-Method")
 	if method == "" {
 		method = r.Method
@@ -67,6 +76,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	clientIP := r.Header.Get("X-Client-IP")
 	wsUpgrade := strings.EqualFold(r.Header.Get("X-WS-Upgrade"), "websocket")
+	ua := r.Header.Get("User-Agent")
+	hasLang := r.Header.Get("Accept-Language") != ""
 
 	// Try existing clearance.
 	var rawTok string
@@ -124,7 +135,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Otherwise, compute risk & decide (covers non-token flows and invalid/near-expiry tokens).
-	score, reasons := h.computeScore(r, method, uri, clientIP, wsUpgrade, rawTok != "" && !tokValid)
+	// Compute score with pre-parsed headers
+	score, reasons := h.computeScore(method, uri, clientIP, wsUpgrade, rawTok != "" && !tokValid, ua, hasLang)
 
 	if h.Cfg.Modes.UnderAttack {
 		score += 15
@@ -136,6 +148,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		metrics.AuthzDecision.WithLabelValues("block").Inc()
 		if wsUpgrade {
 			metrics.WSUpgrades.WithLabelValues("deny").Inc()
+		}
+
+		// Debug logging
+		if h.Cfg.Logging.Level == "debug" {
+			log.Printf("authz decision=block ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
 		}
 
 		// Auto-publish to threat intel
@@ -153,6 +170,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if wsUpgrade {
 			metrics.WSUpgrades.WithLabelValues("deny").Inc()
 		}
+
+		// Debug logging
+		if h.Cfg.Logging.Level == "debug" {
+			log.Printf("authz decision=challenge ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+		}
+
 		setReasonHeaders(w, reasons, score)
 		http.Error(w, "challenge", http.StatusUnauthorized)
 		return
@@ -180,12 +203,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.deferWSRelease(clientIP, "") // release IP lease
 	}
 	metrics.AuthzDecision.WithLabelValues("allow").Inc()
+
+	// Debug logging
+	if h.Cfg.Logging.Level == "debug" {
+		log.Printf("authz decision=allow ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- Scoring (unchanged except for reason details) ----
 
-func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, wsUpgrade bool, hadInvalidToken bool) (int, []string) {
+func (h *Handler) computeScore(method, uri, clientIP string, wsUpgrade bool, hadInvalidToken bool, ua string, hasLang bool) (int, []string) {
 	score := 0
 	reasons := make([]string, 0, 8)
 
@@ -195,7 +224,8 @@ func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, ws
 			// Boost score based on confidence
 			boost := ind.Confidence / 2 // 0-50 points
 			score += boost
-			reasons = append(reasons, fmt.Sprintf("threat_intel_ip(confidence=%d)", ind.Confidence))
+			// Optimize: use simple reason code, confidence is logged separately via metrics
+			reasons = append(reasons, "threat_intel_ip")
 			metrics.ThreatIntelMatches.WithLabelValues(string(ind.Type), ind.Source).Inc()
 		}
 	}
@@ -219,16 +249,16 @@ func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, ws
 		score += 10
 		reasons = append(reasons, "ws_upgrade")
 	}
-	// UA & language
-	ua := strings.ToLower(r.Header.Get("User-Agent"))
+	// UA & language (use pre-lowercased UA for efficiency)
+	uaLower := strings.ToLower(ua)
 	if ua == "" {
 		score += 15
 		reasons = append(reasons, "ua_missing")
-	} else if looksHeadless(ua) {
+	} else if looksHeadless(uaLower) {
 		score += 15
 		reasons = append(reasons, "ua_headless")
 	}
-	if r.Header.Get("Accept-Language") == "" {
+	if !hasLang {
 		score += 10
 		reasons = append(reasons, "al_missing")
 	}
@@ -331,28 +361,49 @@ func (h *Handler) deferWSRelease(clientIP, rawTok string) {
 func (h *Handler) wsIPKey(ip string) string  { return "ip:" + ip }
 func (h *Handler) wsTokKey(tok string) string {
 	// Use a short, deterministic hash instead of the full JWT as the map key.
-	h64 := fnv.New64a()
+	// Pool hash objects to reduce allocations
+	h64 := hashPool.Get().(hash.Hash64)
+	defer hashPool.Put(h64)
+	h64.Reset()
+
 	_, _ = h64.Write([]byte(tok))
 	sum := h64.Sum64()
+
 	// compact hex without fmt to avoid allocs
 	const hexdigits = "0123456789abcdef"
-	var buf [16]byte
+	var buf [20]byte // "tok:" + 16 hex chars
+	copy(buf[:], "tok:")
 	for i := 0; i < 16; i += 2 {
 		shift := uint((7 - i/2) * 8)
 		b := byte(sum >> shift)
-		buf[i] = hexdigits[b>>4]
-		buf[i+1] = hexdigits[b&0x0f]
+		buf[4+i] = hexdigits[b>>4]
+		buf[4+i+1] = hexdigits[b&0x0f]
 	}
-	return "tok:" + string(buf[:])
+	return string(buf[:])
 }
 
 // ---- Response/headers & cookie helpers ----
 
 func setReasonHeaders(w http.ResponseWriter, reasons []string, score int) {
-	if len(reasons) == 0 {
+	// Optimize: avoid strings.Join allocation for common cases
+	switch len(reasons) {
+	case 0:
 		w.Header().Set("X-FastGate-Reason", "unspecified")
-	} else {
-		w.Header().Set("X-FastGate-Reason", strings.Join(reasons, ","))
+	case 1:
+		w.Header().Set("X-FastGate-Reason", reasons[0])
+	case 2:
+		w.Header().Set("X-FastGate-Reason", reasons[0]+","+reasons[1])
+	default:
+		// For 3+ reasons, use strings.Builder
+		var sb strings.Builder
+		sb.Grow(len(reasons) * 16) // estimate
+		for i, r := range reasons {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(r)
+		}
+		w.Header().Set("X-FastGate-Reason", sb.String())
 	}
 	w.Header().Set("X-FastGate-Score", strconv.Itoa(score))
 }
