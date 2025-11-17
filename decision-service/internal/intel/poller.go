@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
@@ -59,7 +60,11 @@ func (p *Poller) poll() {
 	// Fetch indicators added in last polling interval
 	addedAfter := time.Now().Add(-p.Interval)
 
-	data, err := p.Client.FetchIndicators(p.CollectionID, addedAfter)
+	// Create context with timeout to prevent hanging requests
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	data, err := p.Client.FetchIndicators(ctx, p.CollectionID, addedAfter)
 	if err != nil {
 		log.Printf("TAXII fetch error (%s): %v", p.Client.BaseURL, err)
 		return

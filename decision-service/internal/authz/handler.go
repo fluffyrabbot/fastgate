@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +79,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rawTok != "" {
 		if _, ok, _ := h.Keyring.Verify(rawTok, 2*time.Minute); ok {
 			tokValid = true
+		} else {
+			metrics.InvalidTokens.Inc()
 		}
 	}
 
@@ -192,6 +196,7 @@ func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, ws
 			boost := ind.Confidence / 2 // 0-50 points
 			score += boost
 			reasons = append(reasons, fmt.Sprintf("threat_intel_ip(confidence=%d)", ind.Confidence))
+			metrics.ThreatIntelMatches.WithLabelValues(string(ind.Type), ind.Source).Inc()
 		}
 	}
 
@@ -349,31 +354,7 @@ func setReasonHeaders(w http.ResponseWriter, reasons []string, score int) {
 	} else {
 		w.Header().Set("X-FastGate-Reason", strings.Join(reasons, ","))
 	}
-	w.Header().Set("X-FastGate-Score", itoa(score))
-}
-
-// Minimal int->string without fmt to avoid allocs on hot path
-func itoa(i int) string {
-	var b [12]byte
-	pos := len(b)
-	neg := i < 0
-	u := uint32(i)
-	if neg {
-		u = uint32(-i)
-	}
-	if u == 0 {
-		return "0"
-	}
-	for u > 0 {
-		pos--
-		b[pos] = byte('0' + (u % 10))
-		u /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
+	w.Header().Set("X-FastGate-Score", strconv.Itoa(score))
 }
 
 func buildCookie(cfg *config.Config, val string) *http.Cookie {
@@ -399,6 +380,14 @@ func buildCookie(cfg *config.Config, val string) *http.Cookie {
 
 // publishThreat publishes a blocked IP to the threat intelligence feed
 func (h *Handler) publishThreat(ip string, score int, reasons []string) {
+	// Panic recovery for goroutine safety
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic but don't crash the service
+			fmt.Fprintf(os.Stderr, "PANIC in publishThreat: %v\n", r)
+		}
+	}()
+
 	ind := &intel.Indicator{
 		ID:          fmt.Sprintf("indicator--%d", time.Now().UnixNano()),
 		Type:        intel.IndicatorIPv4,

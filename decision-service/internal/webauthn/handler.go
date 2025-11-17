@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/metrics"
+	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -18,14 +21,15 @@ import (
 
 // Handler manages WebAuthn challenge creation and verification.
 type Handler struct {
-	WebAuthn *webauthn.WebAuthn
-	Store    *Store
-	Keyring  *token.Keyring
-	Config   *config.Config
+	WebAuthn    *webauthn.WebAuthn
+	Store       *Store
+	Keyring     *token.Keyring
+	Config      *config.Config
+	RateLimiter *rate.SlidingRPS
 }
 
 // NewHandler creates a new WebAuthn handler.
-func NewHandler(cfg *config.Config, kr *token.Keyring) (*Handler, error) {
+func NewHandler(cfg *config.Config, kr *token.Keyring, rateLimiter *rate.SlidingRPS) (*Handler, error) {
 	wconfig := &webauthn.Config{
 		RPDisplayName: cfg.WebAuthn.RPName,
 		RPID:          cfg.WebAuthn.RPID,
@@ -49,10 +53,11 @@ func NewHandler(cfg *config.Config, kr *token.Keyring) (*Handler, error) {
 	store := NewStore(ttl)
 
 	return &Handler{
-		WebAuthn: wa,
-		Store:    store,
-		Keyring:  kr,
-		Config:   cfg,
+		WebAuthn:    wa,
+		Store:       store,
+		Keyring:     kr,
+		Config:      cfg,
+		RateLimiter: rateLimiter,
 	}, nil
 }
 
@@ -62,6 +67,17 @@ func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Per-IP rate limiting (same guard as PoW: 3 req/sec over 10s window)
+	ip := clientIPFromHeaders(r)
+	if ip != "" && h.RateLimiter != nil {
+		if rps := h.RateLimiter.Add("webauthn-begin:" + ip); rps > 3.0 {
+			metrics.RateLimitHits.WithLabelValues("webauthn_begin").Inc()
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+			return
+		}
 	}
 
 	// Limit request body size to prevent DoS
@@ -127,6 +143,17 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-IP rate limiting (same guard as PoW: 3 req/sec over 10s window)
+	ip := clientIPFromHeaders(r)
+	if ip != "" && h.RateLimiter != nil {
+		if rps := h.RateLimiter.Add("webauthn-finish:" + ip); rps > 3.0 {
+			metrics.RateLimitHits.WithLabelValues("webauthn_finish").Inc()
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+			return
+		}
+	}
+
 	// Limit request body size to prevent DoS
 	r.Body = http.MaxBytesReader(w, r.Body, 1*1024*1024) // 1MB limit for attestation
 	defer r.Body.Close()
@@ -165,6 +192,7 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 	credential, err := h.WebAuthn.CreateCredential(user, *session, parsedResponse)
 	if err != nil {
 		log.Printf("webauthn: attestation verification failed: %v", err)
+		metrics.WebAuthnAttestation.WithLabelValues("failed", "").Inc()
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attestation_failed"})
 		return
 	}
@@ -174,6 +202,7 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 	if isHardwareBacked(credential.AttestationType) {
 		tier = "hardware_attested"
 	}
+	metrics.WebAuthnAttestation.WithLabelValues("success", tier).Inc()
 
 	// Issue clearance token
 	ttl := 24 * time.Hour // Premium TTL for hardware-attested devices
@@ -275,4 +304,23 @@ func sanitizeReturnURL(in string) string {
 		out += "?" + u.RawQuery
 	}
 	return out
+}
+
+// clientIPFromHeaders extracts the client IP from request headers.
+func clientIPFromHeaders(r *http.Request) string {
+	// Prefer the left-most IP in X-Forwarded-For, then fall back to RemoteAddr
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		if len(parts) > 0 {
+			cand := strings.TrimSpace(parts[0])
+			if ip := net.ParseIP(cand); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && net.ParseIP(host) != nil {
+		return host
+	}
+	return ""
 }

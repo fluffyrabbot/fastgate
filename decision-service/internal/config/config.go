@@ -210,20 +210,42 @@ func (c *Config) CookieMaxAge() time.Duration {
 }
 
 func (c *Config) Validate() error {
+	// Server timeout validation (protect against Slowloris)
+	if c.Server.ReadTimeoutMs <= 0 || c.Server.ReadTimeoutMs > 60000 {
+		return errors.New("server.read_timeout_ms must be in (0, 60000]")
+	}
+	if c.Server.WriteTimeoutMs <= 0 || c.Server.WriteTimeoutMs > 300000 {
+		return errors.New("server.write_timeout_ms must be in (0, 300000]")
+	}
+
+	// Policy thresholds
 	if c.Policy.BlockThreshold <= c.Policy.ChallengeThreshold {
 		return errors.New("policy.block_threshold must be > challenge_threshold")
 	}
 	if c.Policy.ChallengeThreshold < 0 || c.Policy.BlockThreshold < 0 {
 		return errors.New("policy thresholds must be non-negative")
 	}
+	if c.Policy.WSConcurrency.PerIP < 0 || c.Policy.WSConcurrency.PerToken < 0 {
+		return errors.New("ws_concurrency_limits must be >= 0")
+	}
+
+	// Cookie validation
 	switch strings.ToLower(c.Cookie.SameSite) {
 	case "lax", "none":
 	default:
 		return errors.New("cookie.same_site must be 'Lax' or 'None'")
 	}
-	if c.Policy.WSConcurrency.PerIP < 0 || c.Policy.WSConcurrency.PerToken < 0 {
-		return errors.New("ws_concurrency_limits must be >= 0")
+	// Cookie domain validation: must be empty or start with a dot or be a valid hostname
+	if c.Cookie.Domain != "" {
+		if !strings.HasPrefix(c.Cookie.Domain, ".") && strings.Contains(c.Cookie.Domain, ".") {
+			// It's a hostname like "example.com" - validate it doesn't have invalid chars
+			if strings.ContainsAny(c.Cookie.Domain, " /\\@:") {
+				return errors.New("cookie.domain contains invalid characters")
+			}
+		}
 	}
+
+	// Challenge validation
 	if c.Challenge.DifficultyBits < 12 || c.Challenge.DifficultyBits > 26 {
 		return errors.New("challenge.difficulty_bits must be between 12 and 26")
 	}
@@ -233,6 +255,8 @@ func (c *Config) Validate() error {
 	if c.Challenge.MaxRetries < 0 || c.Challenge.MaxRetries > 5 {
 		return errors.New("challenge.max_retries must be in [0,5]")
 	}
+
+	// Token validation
 	if c.Token.CurrentKID == "" || len(c.Token.Keys) == 0 {
 		return errors.New("token.keys and token.current_kid required")
 	}
@@ -250,6 +274,62 @@ func (c *Config) Validate() error {
 		}
 		if c.Attestation.Header == "" && c.Attestation.Cookie == "" {
 			return errors.New("attestation.header or attestation.cookie required")
+		}
+		if c.Attestation.Cache.Capacity < 1000 || c.Attestation.Cache.Capacity > 1000000 {
+			return errors.New("attestation.cache.capacity must be in [1000, 1000000]")
+		}
+		if c.Attestation.Cache.TTLSec <= 0 || c.Attestation.Cache.TTLSec > 86400 {
+			return errors.New("attestation.cache.ttl_sec must be in (0, 86400]")
+		}
+	}
+
+	// WebAuthn validation
+	if c.WebAuthn.Enabled {
+		if c.WebAuthn.RPID == "" {
+			return errors.New("webauthn.rp_id required when webauthn.enabled")
+		}
+		if len(c.WebAuthn.RPOrigins) == 0 {
+			return errors.New("webauthn.rp_origins required when webauthn.enabled")
+		}
+		for _, origin := range c.WebAuthn.RPOrigins {
+			if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+				return fmt.Errorf("webauthn.rp_origins must be full URLs (http:// or https://): %s", origin)
+			}
+		}
+		if c.WebAuthn.TTLSec <= 0 || c.WebAuthn.TTLSec > 300 {
+			return errors.New("webauthn.ttl_sec must be in (0, 300]")
+		}
+	}
+
+	// Threat Intel validation
+	if c.ThreatIntel.Enabled {
+		if c.ThreatIntel.CacheCapacity < 1000 || c.ThreatIntel.CacheCapacity > 10000000 {
+			return errors.New("threat_intel.cache_capacity must be in [1000, 10000000]")
+		}
+		for i, peer := range c.ThreatIntel.Peers {
+			if peer.Name == "" {
+				return fmt.Errorf("threat_intel.peers[%d].name required", i)
+			}
+			if peer.URL == "" {
+				return fmt.Errorf("threat_intel.peers[%d].url required", i)
+			}
+			if !strings.HasPrefix(peer.URL, "http://") && !strings.HasPrefix(peer.URL, "https://") {
+				return fmt.Errorf("threat_intel.peers[%d].url must start with http:// or https://", i)
+			}
+			if peer.CollectionID == "" {
+				return fmt.Errorf("threat_intel.peers[%d].collection_id required", i)
+			}
+			if peer.PollIntervalSec < 0 || peer.PollIntervalSec > 86400 {
+				return fmt.Errorf("threat_intel.peers[%d].poll_interval_sec must be in [0, 86400]", i)
+			}
+		}
+		if c.ThreatIntel.AutoPublish.Enabled {
+			if c.ThreatIntel.AutoPublish.MinConfidence < 0 || c.ThreatIntel.AutoPublish.MinConfidence > 100 {
+				return errors.New("threat_intel.auto_publish.min_confidence must be in [0, 100]")
+			}
+			if c.ThreatIntel.AutoPublish.TTLHours <= 0 || c.ThreatIntel.AutoPublish.TTLHours > 720 {
+				return errors.New("threat_intel.auto_publish.ttl_hours must be in (0, 720]")
+			}
 		}
 	}
 

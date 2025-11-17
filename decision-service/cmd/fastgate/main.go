@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"fastgate/decision-service/internal/authz"
@@ -40,6 +44,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
 	kr, err := token.NewKeyring(cfg.Token.Alg, cfg.Token.Keys, cfg.Token.CurrentKID, cfg.Token.Issuer, cfg.Token.SkewSec)
 	if err != nil {
 		log.Fatalf("keyring: %v", err)
@@ -63,7 +70,7 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 	// WebAuthn handler (if enabled)
 	var webauthnHandler *webauthn.Handler
 	if cfg.WebAuthn.Enabled {
-		wh, err := webauthn.NewHandler(cfg, kr)
+		wh, err := webauthn.NewHandler(cfg, kr, chNonceRPS)
 		if err != nil {
 			log.Fatalf("webauthn handler: %v", err)
 		}
@@ -101,16 +108,6 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 
 		log.Printf("Threat intel enabled (peers: %d, cache: %d)", len(cfg.ThreatIntel.Peers), cfg.ThreatIntel.CacheCapacity)
 	}
-
-	// Ensure cleanup on shutdown
-	defer func() {
-		for _, p := range pollers {
-			p.Stop()
-		}
-		if intelStore != nil {
-			intelStore.Close()
-		}
-	}()
 
 	mux := http.NewServeMux()
 
@@ -154,7 +151,8 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 		ip := clientIPFromHeaders(r)
 		if ip != "" {
 			if rps := chNonceRPS.Add("nonce:" + ip); rps > maxChallengeStartsRPSPerIP {
-				w.Header().Set("Retry-After", itoa(challengeRetryAfterSeconds))
+				metrics.RateLimitHits.WithLabelValues("challenge_nonce").Inc()
+				w.Header().Set("Retry-After", strconv.Itoa(challengeRetryAfterSeconds))
 				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 				return
 			}
@@ -269,10 +267,47 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 		Handler:           withCommonHeaders(mux),
 		ReadHeaderTimeout: time.Duration(cfg.Server.ReadTimeoutMs) * time.Millisecond,
 		WriteTimeout:      time.Duration(cfg.Server.WriteTimeoutMs) * time.Millisecond,
+		IdleTimeout:       90 * time.Second,
 	}
-	log.Printf("FastGate Decision Service listening on %s (challenge cap ~%dk, RPS guard %.1f/s per IP)", cfg.Server.Listen, defaultChallengeStoreCap/1000, maxChallengeStartsRPSPerIP)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatal(err)
+
+	// Graceful shutdown setup
+	serverErrors := make(chan error, 1)
+	go func() {
+		log.Printf("FastGate Decision Service listening on %s (challenge cap ~%dk, RPS guard %.1f/s per IP)", cfg.Server.Listen, defaultChallengeStoreCap/1000, maxChallengeStartsRPSPerIP)
+		serverErrors <- srv.ListenAndServe()
+	}()
+
+	// Signal handler for graceful shutdown
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErrors:
+		log.Fatalf("Server error: %v", err)
+	case sig := <-shutdown:
+		log.Printf("Received shutdown signal: %v", sig)
+
+		// Create shutdown context with 30s timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Stop pollers
+		for _, p := range pollers {
+			p.Stop()
+		}
+
+		// Close intel store
+		if intelStore != nil {
+			intelStore.Close()
+		}
+
+		// Gracefully shutdown HTTP server
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("Graceful shutdown failed, forcing: %v", err)
+			srv.Close()
+		}
+
+		log.Println("Shutdown complete")
 	}
 }
 
@@ -366,28 +401,4 @@ func buildCookie(cfg *config.Config, tokenStr string) *http.Cookie {
 		c.Domain = cfg.Cookie.Domain
 	}
 	return c
-}
-
-// Minimal int->string without fmt to avoid allocs
-func itoa(i int) string {
-	var b [12]byte
-	pos := len(b)
-	neg := i < 0
-	u := uint32(i)
-	if neg {
-		u = uint32(-i)
-	}
-	if u == 0 {
-		return "0"
-	}
-	for u > 0 {
-		pos--
-		b[pos] = byte('0' + (u % 10))
-		u /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
 }

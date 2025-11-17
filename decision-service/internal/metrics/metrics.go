@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"log"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -51,8 +53,58 @@ var (
 			ConstLabels: prometheus.Labels{"version": "0.1.0"},
 		},
 	)
+
+	// Security event metrics
+	RateLimitHits = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_rate_limit_hits_total",
+			Help: "Count of rate limit hits by endpoint",
+		},
+		[]string{"endpoint"},
+	)
+	WebAuthnAttestation = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_webauthn_attestation_total",
+			Help: "WebAuthn attestation outcomes",
+		},
+		[]string{"result", "tier"},
+	)
+	ThreatIntelMatches = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_threat_intel_matches_total",
+			Help: "Threat intelligence matches by type",
+		},
+		[]string{"indicator_type", "source"},
+	)
+	InvalidTokens = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "fastgate_invalid_tokens_total",
+			Help: "Count of invalid clearance tokens",
+		},
+	)
 )
 
 func MustRegister() {
-	prometheus.MustRegister(AuthzDecision, AuthzDuration, ClearanceIssued, ChallengeStarted, ChallengeSolved, WSUpgrades, BuildInfo)
+	collectors := []prometheus.Collector{
+		AuthzDecision,
+		AuthzDuration,
+		ClearanceIssued,
+		ChallengeStarted,
+		ChallengeSolved,
+		WSUpgrades,
+		BuildInfo,
+		RateLimitHits,
+		WebAuthnAttestation,
+		ThreatIntelMatches,
+		InvalidTokens,
+	}
+
+	for _, c := range collectors {
+		if err := prometheus.Register(c); err != nil {
+			// Ignore AlreadyRegisteredError (happens on hot reload/restart in tests)
+			if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
+				log.Fatalf("Failed to register metric: %v", err)
+			}
+		}
+	}
 }

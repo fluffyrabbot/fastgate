@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -39,12 +40,12 @@ func NewTAXIIClient(baseURL, username, password string) *TAXIIClient {
 }
 
 // FetchIndicators fetches indicators from a TAXII collection
-func (c *TAXIIClient) FetchIndicators(collectionID string, addedAfter time.Time) ([]byte, error) {
+func (c *TAXIIClient) FetchIndicators(ctx context.Context, collectionID string, addedAfter time.Time) ([]byte, error) {
 	// Escape collection ID to prevent path traversal
 	escapedID := url.PathEscape(collectionID)
 	reqURL := fmt.Sprintf("%s/taxii2/collections/%s/objects/", c.BaseURL, escapedID)
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
