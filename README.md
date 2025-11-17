@@ -19,5 +19,5 @@ See `docs/config.md` and `docs/runbook.md` for details.
 
 ## Credits
 
-Fastgate is primarily authored with the assistance of **GPT-5 Pro**, an AI model, with guidance and direction from the project maintainer.  
+FastGate is primarily authored with the assistance of **Claude**, an AI model from Anthropic, with guidance and direction from the project maintainer.
 This attribution reflects the reality that most of the codebase, design scaffolding, and documentation are generated in collaboration with the model.  

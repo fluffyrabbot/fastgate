@@ -1,25 +1,39 @@
 package authz
 
 import (
+	"fmt"
+	"hash"
 	"hash/fnv"
+	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
 )
 
+// Pool for hash.Hash64 to reduce allocations in WebSocket path
+var hashPool = sync.Pool{
+	New: func() interface{} { return fnv.New64a() },
+}
+
 type Handler struct {
-	Cfg       *config.Config
-	Keyring   *token.Keyring
-	IPRPS     *rate.SlidingRPS
-	TokenRPS  *rate.SlidingRPS
-	WSConcIP  *rate.Concurrency
-	WSConcTok *rate.Concurrency
-	wsLease   time.Duration // assumed WS lifetime; controls auto-release
+	Cfg        *config.Config
+	Keyring    *token.Keyring
+	IPRPS      *rate.SlidingRPS
+	TokenRPS   *rate.SlidingRPS
+	WSConcIP   *rate.Concurrency
+	WSConcTok  *rate.Concurrency
+	wsLease    time.Duration // assumed WS lifetime; controls auto-release
+	IntelStore *intel.Store
+	TAXIIServer *intel.TAXIIServer
 }
 
 func NewHandler(cfg *config.Config, kr *token.Keyring) *Handler {
@@ -51,6 +65,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse headers once to avoid repeated lookups
 	method := r.Header.Get("X-Original-Method")
 	if method == "" {
 		method = r.Method
@@ -61,6 +76,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	clientIP := r.Header.Get("X-Client-IP")
 	wsUpgrade := strings.EqualFold(r.Header.Get("X-WS-Upgrade"), "websocket")
+	ua := r.Header.Get("User-Agent")
+	hasLang := r.Header.Get("Accept-Language") != ""
 
 	// Try existing clearance.
 	var rawTok string
@@ -73,6 +90,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rawTok != "" {
 		if _, ok, _ := h.Keyring.Verify(rawTok, 2*time.Minute); ok {
 			tokValid = true
+		} else {
+			metrics.InvalidTokens.Inc()
 		}
 	}
 
@@ -116,7 +135,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Otherwise, compute risk & decide (covers non-token flows and invalid/near-expiry tokens).
-	score, reasons := h.computeScore(r, method, uri, clientIP, wsUpgrade, rawTok != "" && !tokValid)
+	// Compute score with pre-parsed headers
+	score, reasons := h.computeScore(method, uri, clientIP, wsUpgrade, rawTok != "" && !tokValid, ua, hasLang)
 
 	if h.Cfg.Modes.UnderAttack {
 		score += 15
@@ -129,6 +149,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if wsUpgrade {
 			metrics.WSUpgrades.WithLabelValues("deny").Inc()
 		}
+
+		// Debug logging
+		if h.Cfg.Logging.Level == "debug" {
+			log.Printf("authz decision=block ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+		}
+
+		// Auto-publish to threat intel
+		if h.IntelStore != nil && h.TAXIIServer != nil && clientIP != "" {
+			go h.publishThreat(clientIP, score, reasons)
+		}
+
 		setReasonHeaders(w, reasons, score)
 		http.Error(w, "blocked", http.StatusForbidden)
 		return
@@ -139,6 +170,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if wsUpgrade {
 			metrics.WSUpgrades.WithLabelValues("deny").Inc()
 		}
+
+		// Debug logging
+		if h.Cfg.Logging.Level == "debug" {
+			log.Printf("authz decision=challenge ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+		}
+
 		setReasonHeaders(w, reasons, score)
 		http.Error(w, "challenge", http.StatusUnauthorized)
 		return
@@ -166,18 +203,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.deferWSRelease(clientIP, "") // release IP lease
 	}
 	metrics.AuthzDecision.WithLabelValues("allow").Inc()
+
+	// Debug logging
+	if h.Cfg.Logging.Level == "debug" {
+		log.Printf("authz decision=allow ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- Scoring (unchanged except for reason details) ----
 
-func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, wsUpgrade bool, hadInvalidToken bool) (int, []string) {
+func (h *Handler) computeScore(method, uri, clientIP string, wsUpgrade bool, hadInvalidToken bool, ua string, hasLang bool) (int, []string) {
 	score := 0
 	reasons := make([]string, 0, 8)
 
+	// Check threat intelligence
+	if h.IntelStore != nil && clientIP != "" {
+		if ind, found := h.IntelStore.Check(intel.IndicatorIPv4, clientIP); found {
+			// Boost score based on confidence
+			boost := ind.Confidence / 2 // 0-50 points
+			score += boost
+			// Optimize: use simple reason code, confidence is logged separately via metrics
+			reasons = append(reasons, "threat_intel_ip")
+			metrics.ThreatIntelMatches.WithLabelValues(string(ind.Type), ind.Source).Inc()
+		}
+	}
+
 	// Path base risk (first match)
 	for _, pr := range h.Cfg.Policy.Paths {
-		if pr.Base > 0 && pr.re.MatchString(uri) {
+		if pr.Base > 0 && pr.Re.MatchString(uri) {
 			score += pr.Base
 			reasons = append(reasons, "path_base")
 			break
@@ -194,16 +249,16 @@ func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, ws
 		score += 10
 		reasons = append(reasons, "ws_upgrade")
 	}
-	// UA & language
-	ua := strings.ToLower(r.Header.Get("User-Agent"))
+	// UA & language (use pre-lowercased UA for efficiency)
+	uaLower := strings.ToLower(ua)
 	if ua == "" {
 		score += 15
 		reasons = append(reasons, "ua_missing")
-	} else if looksHeadless(ua) {
+	} else if looksHeadless(uaLower) {
 		score += 15
 		reasons = append(reasons, "ua_headless")
 	}
-	if r.Header.Get("Accept-Language") == "" {
+	if !hasLang {
 		score += 10
 		reasons = append(reasons, "al_missing")
 	}
@@ -306,19 +361,25 @@ func (h *Handler) deferWSRelease(clientIP, rawTok string) {
 func (h *Handler) wsIPKey(ip string) string  { return "ip:" + ip }
 func (h *Handler) wsTokKey(tok string) string {
 	// Use a short, deterministic hash instead of the full JWT as the map key.
-	h64 := fnv.New64a()
+	// Pool hash objects to reduce allocations
+	h64 := hashPool.Get().(hash.Hash64)
+	defer hashPool.Put(h64)
+	h64.Reset()
+
 	_, _ = h64.Write([]byte(tok))
 	sum := h64.Sum64()
+
 	// compact hex without fmt to avoid allocs
 	const hexdigits = "0123456789abcdef"
-	var buf [16]byte
+	var buf [20]byte // "tok:" + 16 hex chars
+	copy(buf[:], "tok:")
 	for i := 0; i < 16; i += 2 {
 		shift := uint((7 - i/2) * 8)
 		b := byte(sum >> shift)
-		buf[i] = hexdigits[b>>4]
-		buf[i+1] = hexdigits[b&0x0f]
+		buf[4+i] = hexdigits[b>>4]
+		buf[4+i+1] = hexdigits[b&0x0f]
 	}
-	return "tok:" + string(buf[:])
+	return string(buf[:])
 }
 
 // ---- Response/headers & cookie helpers ----
@@ -329,31 +390,7 @@ func setReasonHeaders(w http.ResponseWriter, reasons []string, score int) {
 	} else {
 		w.Header().Set("X-FastGate-Reason", strings.Join(reasons, ","))
 	}
-	w.Header().Set("X-FastGate-Score", itoa(score))
-}
-
-// Minimal int->string without fmt to avoid allocs on hot path
-func itoa(i int) string {
-	var b [12]byte
-	pos := len(b)
-	neg := i < 0
-	u := uint32(i)
-	if neg {
-		u = uint32(-i)
-	}
-	if u == 0 {
-		return "0"
-	}
-	for u > 0 {
-		pos--
-		b[pos] = byte('0' + (u % 10))
-		u /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
+	w.Header().Set("X-FastGate-Score", strconv.Itoa(score))
 }
 
 func buildCookie(cfg *config.Config, val string) *http.Cookie {
@@ -375,4 +412,43 @@ func buildCookie(cfg *config.Config, val string) *http.Cookie {
 		c.Domain = cfg.Cookie.Domain
 	}
 	return c
+}
+
+// publishThreat publishes a blocked IP to the threat intelligence feed
+func (h *Handler) publishThreat(ip string, score int, reasons []string) {
+	// Panic recovery for goroutine safety
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic but don't crash the service
+			fmt.Fprintf(os.Stderr, "PANIC in publishThreat: %v\n", r)
+		}
+	}()
+
+	ind := &intel.Indicator{
+		ID:          fmt.Sprintf("indicator--%d", time.Now().UnixNano()),
+		Type:        intel.IndicatorIPv4,
+		Value:       ip,
+		Confidence:  min(score, 100),
+		ValidFrom:   time.Now(),
+		ValidUntil:  time.Now().Add(1 * time.Hour), // Short TTL for IP blocks
+		Labels:      []string{"malicious-activity", "ddos", "layer7"},
+		Source:      "fastgate",
+		Description: fmt.Sprintf("Blocked with score %d: %s", score, strings.Join(reasons, ", ")),
+	}
+
+	// Add to local store
+	h.IntelStore.Add(ind)
+
+	// Publish to TAXII server for peers to consume
+	if err := h.TAXIIServer.PublishIndicator(ind); err != nil {
+		// Log but don't fail the request
+		_ = err
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

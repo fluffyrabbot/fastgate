@@ -21,5 +21,24 @@ Copy `decision-service/config.example.yaml` to your own config and set `FASTGATE
 ## Challenge
 - `difficulty_bits`: proof-of-work cost. 16–20 is a good range; start at 16 in dev.
 
+## WebAuthn (Hardware Attestation)
+- `enabled: true|false` — Enable WebAuthn hardware-backed challenges.
+- `rp_id: "domain.com"` — Relying party ID (must match your domain).
+- `rp_name: "FastGate"` — Display name shown in authenticator UI.
+- `rp_origins: ["https://domain.com"]` — List of valid origins for challenges.
+- `ttl_sec: 60` — Challenge timeout in seconds.
+
+## Threat Intelligence (STIX/TAXII Federation)
+- `enabled: true|false` — Enable federated threat intelligence sharing.
+- `cache_capacity: 50000` — Maximum number of indicators to store in memory.
+- `peers: [...]` — List of TAXII peer servers to subscribe to.
+- `auto_publish: true|false` — Automatically share local attack indicators with peers.
+
+## Behavioral Entropy Analysis
+- `enabled: true|false` — Enable behavioral entropy fingerprinting.
+- `bot_likelihood_block: 0.90` — Block threshold (0.0-1.0). Clients scoring above this are blocked.
+- `bot_likelihood_challenge: 0.50` — Challenge threshold (0.0-1.0). Clients scoring above this get challenged.
+- `collect_signals: {...}` — Configure which behavioral signals to collect (mouse, keyboard, timing, etc.).
+
 ## Key rotation
 - Add a new `kid` to `token.keys`, set `current_kid` to the new key, keep the old one for at least cookie TTL, then remove it.

@@ -44,7 +44,7 @@ type TokenCfg struct {
 type PathRule struct {
 	Pattern string `yaml:"pattern"`
 	Base    int    `yaml:"base"`
-	re      *regexp.Regexp
+	Re      *regexp.Regexp
 }
 
 type PolicyCfg struct {
@@ -93,16 +93,47 @@ type AttestationCfg struct {
 	} `yaml:"redemption"`
 }
 
+type WebAuthnCfg struct {
+	Enabled   bool     `yaml:"enabled"`
+	RPID      string   `yaml:"rp_id"`      // e.g., "localhost" or "example.com"
+	RPName    string   `yaml:"rp_name"`    // e.g., "FastGate"
+	RPOrigins []string `yaml:"rp_origins"` // e.g., ["http://localhost:8088", "https://example.com"]
+	TTLSec    int      `yaml:"ttl_sec"`    // challenge TTL (default 60s)
+}
+
+type ThreatIntelPeer struct {
+	Name             string `yaml:"name"`
+	URL              string `yaml:"url"`
+	CollectionID     string `yaml:"collection_id"`
+	Username         string `yaml:"username"`
+	Password         string `yaml:"password"`
+	PollIntervalSec  int    `yaml:"poll_interval_sec"`
+}
+
+type ThreatIntelCfg struct {
+	Enabled       bool              `yaml:"enabled"`
+	CacheCapacity int               `yaml:"cache_capacity"`
+	Peers         []ThreatIntelPeer `yaml:"peers"`
+	AutoPublish   struct {
+		Enabled       bool `yaml:"enabled"`
+		MinConfidence int  `yaml:"min_confidence"`
+		TTLHours      int  `yaml:"ttl_hours"`
+	} `yaml:"auto_publish"`
+}
+
 type Config struct {
-	Server      ServerCfg      `yaml:"server"`
-	Modes       ModesCfg       `yaml:"modes"`
-	Cookie      CookieCfg      `yaml:"cookie"`
-	Token       TokenCfg       `yaml:"token"`
-	Policy      PolicyCfg      `yaml:"policy"`
-	RateStore   RateStoreCfg   `yaml:"rate_store"`
-	Challenge   ChallengeCfg   `yaml:"challenge"`
-	Logging     LoggingCfg     `yaml:"logging"`
-	Attestation AttestationCfg `yaml:"attestation"`
+	Version     string           `yaml:"version"`      // Config schema version (e.g., "v1")
+	Server      ServerCfg        `yaml:"server"`
+	Modes       ModesCfg         `yaml:"modes"`
+	Cookie      CookieCfg        `yaml:"cookie"`
+	Token       TokenCfg         `yaml:"token"`
+	Policy      PolicyCfg        `yaml:"policy"`
+	RateStore   RateStoreCfg     `yaml:"rate_store"`
+	Challenge   ChallengeCfg     `yaml:"challenge"`
+	Logging     LoggingCfg       `yaml:"logging"`
+	Attestation AttestationCfg   `yaml:"attestation"`
+	WebAuthn    WebAuthnCfg      `yaml:"webauthn"`
+	ThreatIntel ThreatIntelCfg   `yaml:"threat_intel"`
 }
 
 func Load(path string) (*Config, error) {
@@ -114,7 +145,16 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
-	// defaults
+
+	// Version defaults and validation
+	if cfg.Version == "" {
+		cfg.Version = "v1" // Default for backward compatibility
+	}
+	if cfg.Version != "v1" {
+		return nil, fmt.Errorf("unsupported config version: %s (expected v1)", cfg.Version)
+	}
+
+	// Server defaults
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8080"
 	}
@@ -141,7 +181,7 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid path pattern %q: %w", cfg.Policy.Paths[i].Pattern, err)
 		}
-		cfg.Policy.Paths[i].re = re
+		cfg.Policy.Paths[i].Re = re
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
@@ -165,6 +205,13 @@ func Load(path string) (*Config, error) {
 	if cfg.Attestation.Redemption.TimeoutMs == 0 {
 		cfg.Attestation.Redemption.TimeoutMs = 400
 	}
+	// WebAuthn defaults
+	if cfg.WebAuthn.RPName == "" {
+		cfg.WebAuthn.RPName = "FastGate"
+	}
+	if cfg.WebAuthn.TTLSec == 0 {
+		cfg.WebAuthn.TTLSec = 60
+	}
 	return &cfg, nil
 }
 
@@ -173,29 +220,53 @@ func (c *Config) CookieMaxAge() time.Duration {
 }
 
 func (c *Config) Validate() error {
+	// Server timeout validation (protect against Slowloris)
+	if c.Server.ReadTimeoutMs <= 0 || c.Server.ReadTimeoutMs > 60000 {
+		return fmt.Errorf("server.read_timeout_ms must be in (0, 60000], got %d", c.Server.ReadTimeoutMs)
+	}
+	if c.Server.WriteTimeoutMs <= 0 || c.Server.WriteTimeoutMs > 300000 {
+		return fmt.Errorf("server.write_timeout_ms must be in (0, 300000], got %d", c.Server.WriteTimeoutMs)
+	}
+
+	// Policy thresholds
 	if c.Policy.BlockThreshold <= c.Policy.ChallengeThreshold {
-		return errors.New("policy.block_threshold must be > challenge_threshold")
+		return fmt.Errorf("policy.block_threshold (%d) must be > challenge_threshold (%d)", c.Policy.BlockThreshold, c.Policy.ChallengeThreshold)
 	}
 	if c.Policy.ChallengeThreshold < 0 || c.Policy.BlockThreshold < 0 {
-		return errors.New("policy thresholds must be non-negative")
+		return fmt.Errorf("policy thresholds must be non-negative, got challenge=%d block=%d", c.Policy.ChallengeThreshold, c.Policy.BlockThreshold)
 	}
+	if c.Policy.WSConcurrency.PerIP < 0 || c.Policy.WSConcurrency.PerToken < 0 {
+		return fmt.Errorf("ws_concurrency_limits must be >= 0, got per_ip=%d per_token=%d", c.Policy.WSConcurrency.PerIP, c.Policy.WSConcurrency.PerToken)
+	}
+
+	// Cookie validation
 	switch strings.ToLower(c.Cookie.SameSite) {
 	case "lax", "none":
 	default:
-		return errors.New("cookie.same_site must be 'Lax' or 'None'")
+		return fmt.Errorf("cookie.same_site must be 'Lax' or 'None', got %q", c.Cookie.SameSite)
 	}
-	if c.Policy.WSConcurrency.PerIP < 0 || c.Policy.WSConcurrency.PerToken < 0 {
-		return errors.New("ws_concurrency_limits must be >= 0")
+	// Cookie domain validation: must be empty or start with a dot or be a valid hostname
+	if c.Cookie.Domain != "" {
+		if !strings.HasPrefix(c.Cookie.Domain, ".") && strings.Contains(c.Cookie.Domain, ".") {
+			// It's a hostname like "example.com" - validate it doesn't have invalid chars
+			if strings.ContainsAny(c.Cookie.Domain, " /\\@:") {
+				return errors.New("cookie.domain contains invalid characters")
+			}
+		}
 	}
+
+	// Challenge validation
 	if c.Challenge.DifficultyBits < 12 || c.Challenge.DifficultyBits > 26 {
-		return errors.New("challenge.difficulty_bits must be between 12 and 26")
+		return fmt.Errorf("challenge.difficulty_bits must be between 12 and 26, got %d", c.Challenge.DifficultyBits)
 	}
 	if c.Challenge.TTLSec <= 0 || c.Challenge.TTLSec > 300 {
-		return errors.New("challenge.ttl_sec must be in (0, 300]")
+		return fmt.Errorf("challenge.ttl_sec must be in (0, 300], got %d", c.Challenge.TTLSec)
 	}
 	if c.Challenge.MaxRetries < 0 || c.Challenge.MaxRetries > 5 {
-		return errors.New("challenge.max_retries must be in [0,5]")
+		return fmt.Errorf("challenge.max_retries must be in [0,5], got %d", c.Challenge.MaxRetries)
 	}
+
+	// Token validation
 	if c.Token.CurrentKID == "" || len(c.Token.Keys) == 0 {
 		return errors.New("token.keys and token.current_kid required")
 	}
@@ -213,6 +284,62 @@ func (c *Config) Validate() error {
 		}
 		if c.Attestation.Header == "" && c.Attestation.Cookie == "" {
 			return errors.New("attestation.header or attestation.cookie required")
+		}
+		if c.Attestation.Cache.Capacity < 1000 || c.Attestation.Cache.Capacity > 1000000 {
+			return errors.New("attestation.cache.capacity must be in [1000, 1000000]")
+		}
+		if c.Attestation.Cache.TTLSec <= 0 || c.Attestation.Cache.TTLSec > 86400 {
+			return errors.New("attestation.cache.ttl_sec must be in (0, 86400]")
+		}
+	}
+
+	// WebAuthn validation
+	if c.WebAuthn.Enabled {
+		if c.WebAuthn.RPID == "" {
+			return errors.New("webauthn.rp_id required when webauthn.enabled")
+		}
+		if len(c.WebAuthn.RPOrigins) == 0 {
+			return errors.New("webauthn.rp_origins required when webauthn.enabled")
+		}
+		for _, origin := range c.WebAuthn.RPOrigins {
+			if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+				return fmt.Errorf("webauthn.rp_origins must be full URLs (http:// or https://): %s", origin)
+			}
+		}
+		if c.WebAuthn.TTLSec <= 0 || c.WebAuthn.TTLSec > 300 {
+			return errors.New("webauthn.ttl_sec must be in (0, 300]")
+		}
+	}
+
+	// Threat Intel validation
+	if c.ThreatIntel.Enabled {
+		if c.ThreatIntel.CacheCapacity < 1000 || c.ThreatIntel.CacheCapacity > 10000000 {
+			return errors.New("threat_intel.cache_capacity must be in [1000, 10000000]")
+		}
+		for i, peer := range c.ThreatIntel.Peers {
+			if peer.Name == "" {
+				return fmt.Errorf("threat_intel.peers[%d].name required", i)
+			}
+			if peer.URL == "" {
+				return fmt.Errorf("threat_intel.peers[%d].url required", i)
+			}
+			if !strings.HasPrefix(peer.URL, "http://") && !strings.HasPrefix(peer.URL, "https://") {
+				return fmt.Errorf("threat_intel.peers[%d].url must start with http:// or https://", i)
+			}
+			if peer.CollectionID == "" {
+				return fmt.Errorf("threat_intel.peers[%d].collection_id required", i)
+			}
+			if peer.PollIntervalSec < 0 || peer.PollIntervalSec > 86400 {
+				return fmt.Errorf("threat_intel.peers[%d].poll_interval_sec must be in [0, 86400]", i)
+			}
+		}
+		if c.ThreatIntel.AutoPublish.Enabled {
+			if c.ThreatIntel.AutoPublish.MinConfidence < 0 || c.ThreatIntel.AutoPublish.MinConfidence > 100 {
+				return errors.New("threat_intel.auto_publish.min_confidence must be in [0, 100]")
+			}
+			if c.ThreatIntel.AutoPublish.TTLHours <= 0 || c.ThreatIntel.AutoPublish.TTLHours > 720 {
+				return errors.New("threat_intel.auto_publish.ttl_hours must be in (0, 720]")
+			}
 		}
 	}
 

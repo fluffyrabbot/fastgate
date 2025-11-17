@@ -1,3 +1,5 @@
+version: v1
+
 server:
   listen: ":8080"
   read_timeout_ms: 5000
@@ -52,3 +54,31 @@ challenge:
 
 logging:
   level: "info"
+
+webauthn:
+  enabled: true        # Set to true to enable WebAuthn/FIDO2 challenges
+  rp_id: "localhost"   # Must match domain (no protocol, no port)
+  rp_name: "FastGate"
+  rp_origins:
+    - "http://localhost:8088"
+  ttl_sec: 60
+
+threat_intel:
+  enabled: true        # Set to true to enable federated threat intelligence
+  cache_capacity: 50000  # Max indicators to store in memory
+
+  # Peers to subscribe to (fetch indicators from)
+  peers: []
+    # Example peer configuration:
+    # - name: "friend1"
+    #   url: "https://fastgate.friend1.com"
+    #   collection_id: "fastgate"
+    #   username: "fastgate-peer"
+    #   password: "shared-secret"
+    #   poll_interval_sec: 30
+
+  # Auto-publish local attacks to TAXII server
+  auto_publish:
+    enabled: true
+    min_confidence: 70  # Only publish high-confidence blocks (score >= 70)
+    ttl_hours: 1        # How long indicators remain valid
