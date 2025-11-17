@@ -16,6 +16,7 @@ import (
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
+	"fastgate/decision-service/internal/webauthn"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -45,31 +46,29 @@ func main() {
 	authzHandler := authz.NewHandler(cfg, kr)
 
 // Production attestation via redemption service (if enabled and dev not forced)
+// TODO: Implement Privacy Pass attestation
+/*
 if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Attestation.Provider == "privpass" {
-    v, err := attest.NewPrivacyPassVerifier(
-        cfg.Attestation.Header,
-        cfg.Attestation.Cookie,
-        cfg.Attestation.Redemption.Endpoint,
-        cfg.Attestation.Audience,
-        cfg.Attestation.Issuer,
-        time.Duration(cfg.Attestation.Redemption.TimeoutMs)*time.Millisecond,
-        cfg.Attestation.Tier,
-        time.Duration(cfg.Attestation.MaxTTLSec)*time.Second,
-        cfg.Attestation.Cache.Capacity,
-        time.Duration(cfg.Attestation.Cache.TTLSec)*time.Second,
-    )
-    if err != nil {
-        log.Fatalf("attestation verifier: %v", err)
-    }
-    authzHandler.UpdateAttestation(v)
-    log.Printf("Attestation enabled (provider=privpass, header=%s, endpoint=%s)", cfg.Attestation.Header, cfg.Attestation.Redemption.Endpoint)
+    log.Printf("Attestation enabled but not yet implemented (provider=%s)", cfg.Attestation.Provider)
 }
+*/
 
 	// Challenge store (bounded LRU inside; default capacity).
 	chStore := challenge.NewStore(time.Duration(cfg.Challenge.TTLSec) * time.Second)
 
 	// Per-IP guard for challenge/nonce issuance.
 	chNonceRPS := rate.NewSlidingRPS(10)
+
+	// WebAuthn handler (if enabled)
+	var webauthnHandler *webauthn.Handler
+	if cfg.WebAuthn.Enabled {
+		wh, err := webauthn.NewHandler(cfg, kr)
+		if err != nil {
+			log.Fatalf("webauthn handler: %v", err)
+		}
+		webauthnHandler = wh
+		log.Printf("WebAuthn enabled (RP ID: %s, Origins: %v)", cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigins)
+	}
 
 	mux := http.NewServeMux()
 
@@ -198,6 +197,13 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 		w.Header().Set("Location", retURL)
 		w.WriteHeader(http.StatusFound) // 302
 	}))
+
+	// WebAuthn endpoints (if enabled)
+	if webauthnHandler != nil {
+		mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
+		mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
+		log.Printf("WebAuthn endpoints registered: /v1/challenge/webauthn, /v1/challenge/complete/webauthn")
+	}
 
 	// health & metrics
 	mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

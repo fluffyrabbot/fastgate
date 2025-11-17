@@ -94,8 +94,25 @@
 
   async function start() {
     try {
-      // 1) Request a nonce (respect 429 Retry-After)
       let retURL = initialReturnUrl;
+
+      // Try WebAuthn first (if supported and available)
+      if (window.WebAuthnSolver && window.WebAuthnSolver.supportsWebAuthn()) {
+        try {
+          const hasPlatform = await window.WebAuthnSolver.hasPlatformAuthenticator();
+          if (hasPlatform) {
+            setMsg("Authenticating with your device...");
+            await window.WebAuthnSolver.solveWebAuthnChallenge(retURL, setMsg);
+            // If we get here, it succeeded and redirected
+            return;
+          }
+        } catch (webauthnError) {
+          console.log("WebAuthn failed, falling back to PoW:", webauthnError);
+          // Fall through to PoW
+        }
+      }
+
+      // Fallback to PoW challenge
       for (;;) {
         const nonceRes = await postJSON("/v1/challenge/nonce", { return_url: retURL });
         if (nonceRes.status === 429) {

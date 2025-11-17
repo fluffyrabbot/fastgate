@@ -177,7 +177,7 @@ func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, ws
 
 	// Path base risk (first match)
 	for _, pr := range h.Cfg.Policy.Paths {
-		if pr.Base > 0 && pr.re.MatchString(uri) {
+		if pr.Base > 0 && pr.Re.MatchString(uri) {
 			score += pr.Base
 			reasons = append(reasons, "path_base")
 			break

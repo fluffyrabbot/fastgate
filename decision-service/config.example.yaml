@@ -52,3 +52,11 @@ challenge:
 
 logging:
   level: "info"
+
+webauthn:
+  enabled: false       # Set to true to enable WebAuthn/FIDO2 challenges
+  rp_id: "localhost"   # Must match domain (no protocol, no port)
+  rp_name: "FastGate"
+  rp_origins:
+    - "http://localhost:8088"
+  ttl_sec: 60

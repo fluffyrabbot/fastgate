@@ -44,7 +44,7 @@ type TokenCfg struct {
 type PathRule struct {
 	Pattern string `yaml:"pattern"`
 	Base    int    `yaml:"base"`
-	re      *regexp.Regexp
+	Re      *regexp.Regexp
 }
 
 type PolicyCfg struct {
@@ -93,6 +93,14 @@ type AttestationCfg struct {
 	} `yaml:"redemption"`
 }
 
+type WebAuthnCfg struct {
+	Enabled   bool     `yaml:"enabled"`
+	RPID      string   `yaml:"rp_id"`      // e.g., "localhost" or "example.com"
+	RPName    string   `yaml:"rp_name"`    // e.g., "FastGate"
+	RPOrigins []string `yaml:"rp_origins"` // e.g., ["http://localhost:8088", "https://example.com"]
+	TTLSec    int      `yaml:"ttl_sec"`    // challenge TTL (default 60s)
+}
+
 type Config struct {
 	Server      ServerCfg      `yaml:"server"`
 	Modes       ModesCfg       `yaml:"modes"`
@@ -103,6 +111,7 @@ type Config struct {
 	Challenge   ChallengeCfg   `yaml:"challenge"`
 	Logging     LoggingCfg     `yaml:"logging"`
 	Attestation AttestationCfg `yaml:"attestation"`
+	WebAuthn    WebAuthnCfg    `yaml:"webauthn"`
 }
 
 func Load(path string) (*Config, error) {
@@ -141,7 +150,7 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid path pattern %q: %w", cfg.Policy.Paths[i].Pattern, err)
 		}
-		cfg.Policy.Paths[i].re = re
+		cfg.Policy.Paths[i].Re = re
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
@@ -164,6 +173,13 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Attestation.Redemption.TimeoutMs == 0 {
 		cfg.Attestation.Redemption.TimeoutMs = 400
+	}
+	// WebAuthn defaults
+	if cfg.WebAuthn.RPName == "" {
+		cfg.WebAuthn.RPName = "FastGate"
+	}
+	if cfg.WebAuthn.TTLSec == 0 {
+		cfg.WebAuthn.TTLSec = 60
 	}
 	return &cfg, nil
 }
