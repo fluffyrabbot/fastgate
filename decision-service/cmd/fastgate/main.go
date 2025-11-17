@@ -13,6 +13,7 @@ import (
 	"fastgate/decision-service/internal/authz"
 	"fastgate/decision-service/internal/challenge"
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
@@ -68,6 +69,35 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 		}
 		webauthnHandler = wh
 		log.Printf("WebAuthn enabled (RP ID: %s, Origins: %v)", cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigins)
+	}
+
+	// Threat Intelligence (if enabled)
+	var intelStore *intel.Store
+	var taxiiServer *intel.TAXIIServer
+	if cfg.ThreatIntel.Enabled {
+		intelStore = intel.NewStore(cfg.ThreatIntel.CacheCapacity)
+
+		// Start TAXII server (publish)
+		taxiiServer = intel.NewTAXIIServer()
+		taxiiServer.RegisterCollection("fastgate", "FastGate Indicators", "L7 attack indicators")
+
+		// Start TAXII clients (subscribe to peers)
+		for _, peer := range cfg.ThreatIntel.Peers {
+			client := intel.NewTAXIIClient(peer.URL, peer.Username, peer.Password)
+			pollInterval := time.Duration(peer.PollIntervalSec) * time.Second
+			if pollInterval <= 0 {
+				pollInterval = 30 * time.Second
+			}
+			poller := intel.NewPoller(client, intelStore, peer.CollectionID, pollInterval)
+			go poller.Start()
+			log.Printf("Threat intel: polling %s every %v", peer.Name, pollInterval)
+		}
+
+		// Inject into authz handler
+		authzHandler.IntelStore = intelStore
+		authzHandler.TAXIIServer = taxiiServer
+
+		log.Printf("Threat intel enabled (peers: %d, cache: %d)", len(cfg.ThreatIntel.Peers), cfg.ThreatIntel.CacheCapacity)
 	}
 
 	mux := http.NewServeMux()
@@ -203,6 +233,13 @@ if os.Getenv("FASTGATE_DEV_ATTEST") != "1" && cfg.Attestation.Enabled && cfg.Att
 		mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
 		mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
 		log.Printf("WebAuthn endpoints registered: /v1/challenge/webauthn, /v1/challenge/complete/webauthn")
+	}
+
+	// TAXII endpoints (if threat intel enabled)
+	if taxiiServer != nil {
+		mux.Handle("/taxii2/collections/", http.HandlerFunc(taxiiServer.HandleCollections))
+		mux.Handle("/taxii2/collections/fastgate/objects/", http.HandlerFunc(taxiiServer.HandleObjects))
+		log.Printf("TAXII endpoints registered: /taxii2/collections/, /taxii2/collections/fastgate/objects/")
 	}
 
 	// health & metrics

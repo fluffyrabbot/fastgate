@@ -1,25 +1,29 @@
 package authz
 
 import (
+	"fmt"
 	"hash/fnv"
 	"net/http"
 	"strings"
 	"time"
 
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
 )
 
 type Handler struct {
-	Cfg       *config.Config
-	Keyring   *token.Keyring
-	IPRPS     *rate.SlidingRPS
-	TokenRPS  *rate.SlidingRPS
-	WSConcIP  *rate.Concurrency
-	WSConcTok *rate.Concurrency
-	wsLease   time.Duration // assumed WS lifetime; controls auto-release
+	Cfg        *config.Config
+	Keyring    *token.Keyring
+	IPRPS      *rate.SlidingRPS
+	TokenRPS   *rate.SlidingRPS
+	WSConcIP   *rate.Concurrency
+	WSConcTok  *rate.Concurrency
+	wsLease    time.Duration // assumed WS lifetime; controls auto-release
+	IntelStore *intel.Store
+	TAXIIServer *intel.TAXIIServer
 }
 
 func NewHandler(cfg *config.Config, kr *token.Keyring) *Handler {
@@ -129,6 +133,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if wsUpgrade {
 			metrics.WSUpgrades.WithLabelValues("deny").Inc()
 		}
+
+		// Auto-publish to threat intel
+		if h.IntelStore != nil && h.TAXIIServer != nil && clientIP != "" {
+			go h.publishThreat(clientIP, score, reasons)
+		}
+
 		setReasonHeaders(w, reasons, score)
 		http.Error(w, "blocked", http.StatusForbidden)
 		return
@@ -174,6 +184,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) computeScore(r *http.Request, method, uri, clientIP string, wsUpgrade bool, hadInvalidToken bool) (int, []string) {
 	score := 0
 	reasons := make([]string, 0, 8)
+
+	// Check threat intelligence
+	if h.IntelStore != nil && clientIP != "" {
+		if ind, found := h.IntelStore.Check(intel.IndicatorIPv4, clientIP); found {
+			// Boost score based on confidence
+			boost := ind.Confidence / 2 // 0-50 points
+			score += boost
+			reasons = append(reasons, fmt.Sprintf("threat_intel_ip(confidence=%d)", ind.Confidence))
+		}
+	}
 
 	// Path base risk (first match)
 	for _, pr := range h.Cfg.Policy.Paths {
@@ -375,4 +395,35 @@ func buildCookie(cfg *config.Config, val string) *http.Cookie {
 		c.Domain = cfg.Cookie.Domain
 	}
 	return c
+}
+
+// publishThreat publishes a blocked IP to the threat intelligence feed
+func (h *Handler) publishThreat(ip string, score int, reasons []string) {
+	ind := &intel.Indicator{
+		ID:          fmt.Sprintf("indicator--%d", time.Now().UnixNano()),
+		Type:        intel.IndicatorIPv4,
+		Value:       ip,
+		Confidence:  min(score, 100),
+		ValidFrom:   time.Now(),
+		ValidUntil:  time.Now().Add(1 * time.Hour), // Short TTL for IP blocks
+		Labels:      []string{"malicious-activity", "ddos", "layer7"},
+		Source:      "fastgate",
+		Description: fmt.Sprintf("Blocked with score %d: %s", score, strings.Join(reasons, ", ")),
+	}
+
+	// Add to local store
+	h.IntelStore.Add(ind)
+
+	// Publish to TAXII server for peers to consume
+	if err := h.TAXIIServer.PublishIndicator(ind); err != nil {
+		// Log but don't fail the request
+		_ = err
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

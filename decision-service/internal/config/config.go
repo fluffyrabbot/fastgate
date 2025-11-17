@@ -101,17 +101,38 @@ type WebAuthnCfg struct {
 	TTLSec    int      `yaml:"ttl_sec"`    // challenge TTL (default 60s)
 }
 
+type ThreatIntelPeer struct {
+	Name             string `yaml:"name"`
+	URL              string `yaml:"url"`
+	CollectionID     string `yaml:"collection_id"`
+	Username         string `yaml:"username"`
+	Password         string `yaml:"password"`
+	PollIntervalSec  int    `yaml:"poll_interval_sec"`
+}
+
+type ThreatIntelCfg struct {
+	Enabled       bool              `yaml:"enabled"`
+	CacheCapacity int               `yaml:"cache_capacity"`
+	Peers         []ThreatIntelPeer `yaml:"peers"`
+	AutoPublish   struct {
+		Enabled       bool `yaml:"enabled"`
+		MinConfidence int  `yaml:"min_confidence"`
+		TTLHours      int  `yaml:"ttl_hours"`
+	} `yaml:"auto_publish"`
+}
+
 type Config struct {
-	Server      ServerCfg      `yaml:"server"`
-	Modes       ModesCfg       `yaml:"modes"`
-	Cookie      CookieCfg      `yaml:"cookie"`
-	Token       TokenCfg       `yaml:"token"`
-	Policy      PolicyCfg      `yaml:"policy"`
-	RateStore   RateStoreCfg   `yaml:"rate_store"`
-	Challenge   ChallengeCfg   `yaml:"challenge"`
-	Logging     LoggingCfg     `yaml:"logging"`
-	Attestation AttestationCfg `yaml:"attestation"`
-	WebAuthn    WebAuthnCfg    `yaml:"webauthn"`
+	Server      ServerCfg        `yaml:"server"`
+	Modes       ModesCfg         `yaml:"modes"`
+	Cookie      CookieCfg        `yaml:"cookie"`
+	Token       TokenCfg         `yaml:"token"`
+	Policy      PolicyCfg        `yaml:"policy"`
+	RateStore   RateStoreCfg     `yaml:"rate_store"`
+	Challenge   ChallengeCfg     `yaml:"challenge"`
+	Logging     LoggingCfg       `yaml:"logging"`
+	Attestation AttestationCfg   `yaml:"attestation"`
+	WebAuthn    WebAuthnCfg      `yaml:"webauthn"`
+	ThreatIntel ThreatIntelCfg   `yaml:"threat_intel"`
 }
 
 func Load(path string) (*Config, error) {
