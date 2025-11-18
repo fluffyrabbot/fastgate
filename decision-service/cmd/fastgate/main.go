@@ -19,6 +19,7 @@ import (
 	"fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
+	"fastgate/decision-service/internal/proxy"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
 	"fastgate/decision-service/internal/webauthn"
@@ -106,10 +107,68 @@ func main() {
 		log.Printf("Threat intel enabled (peers: %d, cache: %d)", len(cfg.ThreatIntel.Peers), cfg.ThreatIntel.CacheCapacity)
 	}
 
-	mux := http.NewServeMux()
+	// Check if we're using integrated proxy mode
+	var handler http.Handler
+	if cfg.Proxy.Enabled && cfg.Proxy.Mode == "integrated" {
+		// Integrated proxy mode: all requests go through proxy handler
+		log.Printf("Starting in integrated proxy mode")
 
-	// /v1/authz — called via NGINX auth_request
-	mux.Handle("/v1/authz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Determine challenge page directory
+		challengePageDir := os.Getenv("CHALLENGE_PAGE_DIR")
+		if challengePageDir == "" {
+			challengePageDir = "./challenge-page"
+		}
+
+		// Create integrated proxy handler
+		proxyHandler, err := proxy.NewHandler(cfg, authzHandler, challengePageDir)
+		if err != nil {
+			log.Fatalf("proxy handler: %v", err)
+		}
+
+		// Create mux for API endpoints and proxy
+		mux := http.NewServeMux()
+
+		// Challenge endpoints (for PoW and WebAuthn challenges)
+		mux.Handle("/v1/challenge/nonce", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleChallengeNonce(w, r, cfg, chStore, chNonceRPS)
+		}))
+		mux.Handle("/v1/challenge/complete", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleChallengeComplete(w, r, cfg, chStore, kr)
+		}))
+
+		// WebAuthn endpoints (if enabled)
+		if webauthnHandler != nil {
+			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
+			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
+		}
+
+		// TAXII endpoints (if threat intel enabled)
+		if taxiiServer != nil {
+			mux.Handle("/taxii2/collections/", http.HandlerFunc(taxiiServer.HandleCollections))
+			mux.Handle("/taxii2/collections/fastgate/objects/", http.HandlerFunc(taxiiServer.HandleObjects))
+		}
+
+		// Health & metrics endpoints
+		mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		metrics.MustRegister()
+		mux.Handle("/metrics", promhttp.Handler())
+
+		// Proxy handler for all other requests
+		mux.Handle("/", proxyHandler)
+
+		handler = withCommonHeaders(mux)
+	} else {
+		// NGINX mode: traditional auth_request endpoint mode
+		log.Printf("Starting in NGINX mode (auth_request)")
+		mux := http.NewServeMux()
+
+		// /v1/authz — called via NGINX auth_request
+		mux.Handle("/v1/authz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Observe mode: always allow, but run handler to issue cookies/metrics
 		if !cfg.Modes.Enforce {
 			rr := newResponseRecorder()
@@ -305,16 +364,19 @@ func main() {
 	mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	metrics.MustRegister()
-	mux.Handle("/metrics", promhttp.Handler())
+		metrics.MustRegister()
+		mux.Handle("/metrics", promhttp.Handler())
+
+		handler = withCommonHeaders(mux)
+	}
 
 	// Log feature state summary
-	log.Printf("Feature configuration: enforce=%v fail_open=%v under_attack=%v webauthn=%v threat_intel=%v",
-		cfg.Modes.Enforce, cfg.Modes.FailOpen, cfg.Modes.UnderAttack, cfg.WebAuthn.Enabled, cfg.ThreatIntel.Enabled)
+	log.Printf("Feature configuration: enforce=%v fail_open=%v under_attack=%v webauthn=%v threat_intel=%v proxy_mode=%s",
+		cfg.Modes.Enforce, cfg.Modes.FailOpen, cfg.Modes.UnderAttack, cfg.WebAuthn.Enabled, cfg.ThreatIntel.Enabled, cfg.Proxy.Mode)
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
-		Handler:           withCommonHeaders(mux),
+		Handler:           handler,
 		ReadHeaderTimeout: time.Duration(cfg.Server.ReadTimeoutMs) * time.Millisecond,
 		WriteTimeout:      time.Duration(cfg.Server.WriteTimeoutMs) * time.Millisecond,
 		IdleTimeout:       90 * time.Second,
@@ -359,6 +421,167 @@ func main() {
 
 		log.Println("Shutdown complete")
 	}
+}
+
+// ---- Challenge Handler Functions (for integrated mode) ----
+
+func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Config, chStore *challenge.Store, chNonceRPS *rate.SlidingRPS) {
+	// Method & body caps
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	// Limit request body size
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBytes)
+	defer r.Body.Close()
+
+	type Req struct {
+		ReturnURL string `json:"return_url"`
+	}
+	var req Req
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
+		return
+	}
+	retURL := sanitizeReturnURL(req.ReturnURL)
+
+	// Per-IP RPS guard
+	ip := clientIPFromHeaders(r)
+	if ip != "" {
+		if rps := chNonceRPS.Add("nonce:" + ip); rps > maxChallengeStartsRPSPerIP {
+			metrics.RateLimitHits.WithLabelValues("challenge_nonce").Inc()
+			w.Header().Set("Retry-After", strconv.Itoa(challengeRetryAfterSeconds))
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+			return
+		}
+	}
+
+	// Mint challenge with configured difficulty & retries
+	id, nonce, err := chStore.NewWithMaxRetries(cfg.Challenge.DifficultyBits, cfg.Challenge.MaxRetries)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
+	}
+	metrics.ChallengeStarted.Inc()
+
+	resp := map[string]any{
+		"challenge_id":    id,
+		"nonce":           nonce,
+		"difficulty_bits": cfg.Challenge.DifficultyBits,
+		"expires_at":      time.Now().Add(time.Duration(cfg.Challenge.TTLSec) * time.Second).UTC().Format(time.RFC3339),
+		"return_url":      retURL,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config.Config, chStore *challenge.Store, kr *token.Keyring) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxEntropyBytes) // Allow larger payloads for entropy data
+	defer r.Body.Close()
+
+	type Req struct {
+		ChallengeID string                `json:"challenge_id"`
+		Nonce       string                `json:"nonce"`
+		Solution    uint32                `json:"solution"`
+		ReturnURL   string                `json:"return_url"`
+		UAHints     map[string]any        `json:"ua_hints"`
+		Entropy     *entropy.Profile      `json:"entropy,omitempty"`
+	}
+	var req Req
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
+		return
+	}
+	if req.ChallengeID == "" || req.Nonce == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_fields"})
+		return
+	}
+
+	// Validate entropy payload to prevent DoS via unbounded arrays
+	if req.Entropy != nil {
+		const maxAnomalies = 50 // Reasonable upper bound for anomaly counts
+		if len(req.Entropy.Anomalies.Hardware) > maxAnomalies ||
+			len(req.Entropy.Anomalies.Behavioral) > maxAnomalies ||
+			len(req.Entropy.Anomalies.Environment) > maxAnomalies {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too_many_anomalies"})
+			return
+		}
+	}
+
+	retURL := sanitizeReturnURL(req.ReturnURL)
+
+	// Atomically validate and consume
+	ok, reason, _ := chStore.TrySolve(req.ChallengeID, req.Nonce, req.Solution)
+	if !ok {
+		// Debug logging for challenge validation failures
+		if cfg.Logging.Level == "debug" {
+			clientIP := clientIPFromHeaders(r)
+			log.Printf("Challenge validation failed: reason=%s id=%s ip=%s", reason, req.ChallengeID, clientIP)
+		}
+
+		switch reason {
+		case "not_found", "expired":
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
+			return
+		case "invalid_nonce", "invalid_solution":
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
+			return
+		case "too_many_retries":
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
+			return
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid"})
+			return
+		}
+	}
+
+	// Success — analyze entropy and issue clearance cookie
+	tier := "low" // Default tier for PoW completion
+
+	// Analyze entropy if provided
+	if req.Entropy != nil {
+		analyzer := entropy.NewAnalyzer()
+		assessment := analyzer.Analyze(req.Entropy)
+
+		if cfg.Logging.Level == "debug" {
+			log.Printf("Entropy assessment: bot=%.2f confidence=%.2f suspicious=%v reasons=%v",
+				assessment.BotScore, assessment.Confidence, assessment.IsSuspicious, assessment.Reasons)
+		}
+
+		// Upgrade tier if low bot score and high confidence
+		if !assessment.IsSuspicious && assessment.Confidence >= 0.5 {
+			tier = "medium" // Upgrade to medium for human-like behavior
+		}
+
+		// Downgrade tier if high bot score
+		if assessment.IsBot {
+			tier = "low" // Keep low tier for bot-like behavior
+			if cfg.Logging.Level == "debug" {
+				log.Printf("Bot detected (score=%.2f): %v", assessment.BotScore, assessment.Reasons)
+			}
+		}
+	}
+
+	tokenStr, err := kr.Sign(tier, cfg.CookieMaxAge())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
+	}
+	http.SetCookie(w, buildCookie(cfg, tokenStr))
+	metrics.ChallengeSolved.Inc()
+
+	if cfg.Logging.Level == "debug" {
+		log.Printf("Clearance issued: tier=%s", tier)
+	}
+
+	if retURL == "" {
+		retURL = "/"
+	}
+	w.Header().Set("Location", retURL)
+	w.WriteHeader(http.StatusFound) // 302
 }
 
 // ---- Helpers ----

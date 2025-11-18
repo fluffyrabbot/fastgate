@@ -121,6 +121,23 @@ type ThreatIntelCfg struct {
 	} `yaml:"auto_publish"`
 }
 
+type ProxyRoute struct {
+	Host    string `yaml:"host"`    // Host-based routing (e.g., "game.example.com")
+	Path    string `yaml:"path"`    // Path-based routing pattern (e.g., "^/api/")
+	Origin  string `yaml:"origin"`  // Upstream origin URL
+	PathRe  *regexp.Regexp
+}
+
+type ProxyCfg struct {
+	Enabled         bool         `yaml:"enabled"`          // Enable integrated proxy mode
+	Mode            string       `yaml:"mode"`             // "integrated" | "nginx" (default: integrated)
+	Origin          string       `yaml:"origin"`           // Simple single-origin mode
+	Routes          []ProxyRoute `yaml:"routes"`           // Multi-origin routing rules
+	ChallengePath   string       `yaml:"challenge_path"`   // Challenge page path (default: /__uam)
+	TimeoutMs       int          `yaml:"timeout_ms"`       // Proxy timeout (default: 30000)
+	IdleTimeoutMs   int          `yaml:"idle_timeout_ms"`  // Idle timeout (default: 90000)
+}
+
 type Config struct {
 	Version     string           `yaml:"version"`      // Config schema version (e.g., "v1")
 	Server      ServerCfg        `yaml:"server"`
@@ -134,6 +151,7 @@ type Config struct {
 	Attestation AttestationCfg   `yaml:"attestation"`
 	WebAuthn    WebAuthnCfg      `yaml:"webauthn"`
 	ThreatIntel ThreatIntelCfg   `yaml:"threat_intel"`
+	Proxy       ProxyCfg         `yaml:"proxy"`
 }
 
 func Load(path string) (*Config, error) {
@@ -211,6 +229,29 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.WebAuthn.TTLSec == 0 {
 		cfg.WebAuthn.TTLSec = 60
+	}
+	// Proxy defaults
+	if cfg.Proxy.Mode == "" {
+		cfg.Proxy.Mode = "integrated"
+	}
+	if cfg.Proxy.ChallengePath == "" {
+		cfg.Proxy.ChallengePath = "/__uam"
+	}
+	if cfg.Proxy.TimeoutMs == 0 {
+		cfg.Proxy.TimeoutMs = 30000
+	}
+	if cfg.Proxy.IdleTimeoutMs == 0 {
+		cfg.Proxy.IdleTimeoutMs = 90000
+	}
+	// Compile route path patterns
+	for i := range cfg.Proxy.Routes {
+		if cfg.Proxy.Routes[i].Path != "" {
+			re, err := regexp.Compile(cfg.Proxy.Routes[i].Path)
+			if err != nil {
+				return nil, fmt.Errorf("invalid proxy route path pattern %q: %w", cfg.Proxy.Routes[i].Path, err)
+			}
+			cfg.Proxy.Routes[i].PathRe = re
+		}
 	}
 	return &cfg, nil
 }
@@ -339,6 +380,41 @@ func (c *Config) Validate() error {
 			}
 			if c.ThreatIntel.AutoPublish.TTLHours <= 0 || c.ThreatIntel.AutoPublish.TTLHours > 720 {
 				return errors.New("threat_intel.auto_publish.ttl_hours must be in (0, 720]")
+			}
+		}
+	}
+
+	// Proxy validation
+	if c.Proxy.Enabled {
+		if c.Proxy.Mode != "integrated" && c.Proxy.Mode != "nginx" {
+			return fmt.Errorf("proxy.mode must be 'integrated' or 'nginx', got %q", c.Proxy.Mode)
+		}
+		if c.Proxy.TimeoutMs <= 0 || c.Proxy.TimeoutMs > 300000 {
+			return errors.New("proxy.timeout_ms must be in (0, 300000]")
+		}
+		if c.Proxy.IdleTimeoutMs <= 0 || c.Proxy.IdleTimeoutMs > 600000 {
+			return errors.New("proxy.idle_timeout_ms must be in (0, 600000]")
+		}
+		// Validate that either origin or routes is specified
+		if c.Proxy.Origin == "" && len(c.Proxy.Routes) == 0 {
+			return errors.New("proxy.origin or proxy.routes required when proxy.enabled")
+		}
+		// Validate origin URL format
+		if c.Proxy.Origin != "" {
+			if !strings.HasPrefix(c.Proxy.Origin, "http://") && !strings.HasPrefix(c.Proxy.Origin, "https://") {
+				return fmt.Errorf("proxy.origin must start with http:// or https://, got %q", c.Proxy.Origin)
+			}
+		}
+		// Validate route configurations
+		for i, route := range c.Proxy.Routes {
+			if route.Host == "" && route.Path == "" {
+				return fmt.Errorf("proxy.routes[%d]: either host or path required", i)
+			}
+			if route.Origin == "" {
+				return fmt.Errorf("proxy.routes[%d].origin required", i)
+			}
+			if !strings.HasPrefix(route.Origin, "http://") && !strings.HasPrefix(route.Origin, "https://") {
+				return fmt.Errorf("proxy.routes[%d].origin must start with http:// or https://", i)
 			}
 		}
 	}

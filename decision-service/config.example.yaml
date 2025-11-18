@@ -82,3 +82,33 @@ threat_intel:
     enabled: true
     min_confidence: 70  # Only publish high-confidence blocks (score >= 70)
     ttl_hours: 1        # How long indicators remain valid
+
+proxy:
+  enabled: false       # Set to true to enable integrated reverse proxy mode
+  mode: "integrated"   # "integrated" = single binary mode | "nginx" = traditional auth_request mode
+
+  # Simple single-origin mode (for most use cases)
+  origin: "http://localhost:3000"
+
+  # Advanced: Multi-origin routing (comment out 'origin' above to use routes)
+  # routes:
+  #   # Host-based routing
+  #   - host: "game.example.com"
+  #     origin: "http://localhost:3000"
+  #
+  #   - host: "shop.example.com"
+  #     origin: "http://localhost:4000"
+  #
+  #   # Path-based routing (regex patterns)
+  #   - path: "^/api/"
+  #     origin: "http://localhost:5000"
+  #
+  #   - path: "^/static/"
+  #     origin: "http://cdn.example.com"
+
+  # Challenge page path (where PoW/WebAuthn challenges are served)
+  challenge_path: "/__uam"
+
+  # Proxy timeouts (in milliseconds)
+  timeout_ms: 30000       # 30 seconds
+  idle_timeout_ms: 90000  # 90 seconds
