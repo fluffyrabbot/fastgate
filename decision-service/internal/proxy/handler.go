@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"log"
@@ -31,8 +32,10 @@ var (
 
 // cachedProxy wraps a reverse proxy with metadata
 type cachedProxy struct {
-	proxy     *httputil.ReverseProxy
-	createdAt time.Time
+	proxy      *httputil.ReverseProxy
+	createdAt  time.Time
+	originURL  string         // Store origin for LRU eviction
+	lruElement *list.Element  // Pointer to element in LRU list
 }
 
 // Handler is an integrated reverse proxy that performs authorization checks inline
@@ -40,6 +43,7 @@ type Handler struct {
 	cfg              *config.Config
 	authzHandler     *authz.Handler
 	proxies          map[string]*cachedProxy
+	proxiesLRU       *list.List  // LRU list for cache eviction
 	proxiesMu        sync.RWMutex
 	challengePageDir string
 }
@@ -59,6 +63,7 @@ func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDi
 		cfg:              cfg,
 		authzHandler:     authzHandler,
 		proxies:          make(map[string]*cachedProxy),
+		proxiesLRU:       list.New(),
 		challengePageDir: challengePageDir,
 	}
 
@@ -239,33 +244,40 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 	r.Header.Del("X-Forwarded-Proto")
 	r.Header.Del("X-Forwarded-Host")
 
-	// Proxy the request
+	// Proxy the request with latency tracking
+	start := time.Now()
 	proxy.ServeHTTP(w, r)
+	duration := time.Since(start)
+
+	// Record proxy latency metric
+	metrics.ProxyLatency.WithLabelValues(originURL).Observe(duration.Seconds())
 }
 
 // getOrCreateProxy returns a reverse proxy for the given origin URL
 func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 	// Check if we already have a proxy for this origin
-	h.proxiesMu.RLock()
+	h.proxiesMu.Lock()
 	if cp, ok := h.proxies[originURL]; ok {
 		// Check if proxy is still fresh (TTL-based expiration for DNS updates)
 		if time.Since(cp.createdAt) < proxyCacheTTL {
-			h.proxiesMu.RUnlock()
+			// Move to front of LRU list (most recently used)
+			h.proxiesLRU.MoveToFront(cp.lruElement)
+			h.proxiesMu.Unlock()
+			metrics.ProxyCacheOps.WithLabelValues("hit").Inc()
 			return cp.proxy
 		}
-		// Expired, need to recreate (drop lock to avoid deadlock)
-		h.proxiesMu.RUnlock()
-
-		// Clean up expired proxy
-		h.proxiesMu.Lock()
+		// Expired, need to recreate
 		if transport, ok := cp.proxy.Transport.(*http.Transport); ok {
 			transport.CloseIdleConnections()
 		}
+		h.proxiesLRU.Remove(cp.lruElement)
 		delete(h.proxies, originURL)
-		h.proxiesMu.Unlock()
-	} else {
-		h.proxiesMu.RUnlock()
+		metrics.ProxyCacheOps.WithLabelValues("expiration").Inc()
 	}
+	h.proxiesMu.Unlock()
+
+	// Cache miss - creating new proxy
+	metrics.ProxyCacheOps.WithLabelValues("miss").Inc()
 
 	// Create new proxy
 	target, err := url.Parse(originURL)
@@ -276,12 +288,12 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// Configure proxy transport with configurable timeouts
+	// Configure proxy transport with configurable timeouts and connection pools
 	timeoutDuration := time.Duration(h.cfg.Proxy.TimeoutMs) * time.Millisecond
 	proxy.Transport = &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20,
-		MaxConnsPerHost:       100, // Prevent connection exhaustion
+		MaxIdleConns:          h.cfg.Proxy.MaxIdleConns,
+		MaxIdleConnsPerHost:   h.cfg.Proxy.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       h.cfg.Proxy.MaxConnsPerHost,
 		IdleConnTimeout:       time.Duration(h.cfg.Proxy.IdleTimeoutMs) * time.Millisecond,
 		ResponseHeaderTimeout: timeoutDuration,
 		TLSHandshakeTimeout:   timeoutDuration / 3, // 1/3 of total timeout for handshake
@@ -319,6 +331,7 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 			if h.cfg.Logging.Level == "debug" {
 				log.Printf("Proxy request canceled: %v", err)
 			}
+			metrics.ProxyErrors.WithLabelValues(originURL, "context").Inc()
 			return
 		}
 
@@ -326,6 +339,7 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 
 		// Differentiate timeout errors
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			metrics.ProxyErrors.WithLabelValues(originURL, "timeout").Inc()
 			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
 			return
 		}
@@ -333,17 +347,20 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 		// DNS errors
 		if dnsErr, ok := err.(*net.DNSError); ok {
 			log.Printf("DNS resolution failed for %s: %v", originURL, dnsErr)
+			metrics.ProxyErrors.WithLabelValues(originURL, "dns").Inc()
 			http.Error(w, "service unavailable: DNS error", http.StatusServiceUnavailable)
 			return
 		}
 
 		// Connection errors
 		if strings.Contains(err.Error(), "connection refused") {
+			metrics.ProxyErrors.WithLabelValues(originURL, "connection").Inc()
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
 		// Default to bad gateway
+		metrics.ProxyErrors.WithLabelValues(originURL, "other").Inc()
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}
 
@@ -351,22 +368,30 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 	h.proxiesMu.Lock()
 	defer h.proxiesMu.Unlock()
 
-	// Implement simple cache eviction when at capacity
+	// Implement LRU cache eviction when at capacity
 	if len(h.proxies) >= maxProxyCacheSize {
-		// Evict first entry (simple strategy, good enough for this use case)
-		for k := range h.proxies {
-			if transport, ok := h.proxies[k].proxy.Transport.(*http.Transport); ok {
+		// Evict least recently used (back of list)
+		if back := h.proxiesLRU.Back(); back != nil {
+			evictCP := back.Value.(*cachedProxy)
+			if transport, ok := evictCP.proxy.Transport.(*http.Transport); ok {
 				transport.CloseIdleConnections()
 			}
-			delete(h.proxies, k)
-			break
+			delete(h.proxies, evictCP.originURL)
+			h.proxiesLRU.Remove(back)
+			metrics.ProxyCacheOps.WithLabelValues("eviction").Inc()
 		}
 	}
 
-	h.proxies[originURL] = &cachedProxy{
+	// Create cached proxy entry
+	cp := &cachedProxy{
 		proxy:     proxy,
 		createdAt: time.Now(),
+		originURL: originURL,
 	}
+	// Add to front of LRU list (most recently used)
+	cp.lruElement = h.proxiesLRU.PushFront(cp)
+	h.proxies[originURL] = cp
+
 	return proxy
 }
 

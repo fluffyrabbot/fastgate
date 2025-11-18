@@ -132,13 +132,16 @@ type ProxyRoute struct {
 }
 
 type ProxyCfg struct {
-	Enabled         bool         `yaml:"enabled"`          // Enable integrated proxy mode
-	Mode            string       `yaml:"mode"`             // "integrated" | "nginx" (default: integrated)
-	Origin          string       `yaml:"origin"`           // Simple single-origin mode
-	Routes          []ProxyRoute `yaml:"routes"`           // Multi-origin routing rules
-	ChallengePath   string       `yaml:"challenge_path"`   // Challenge page path (default: /__uam)
-	TimeoutMs       int          `yaml:"timeout_ms"`       // Proxy timeout (default: 30000)
-	IdleTimeoutMs   int          `yaml:"idle_timeout_ms"`  // Idle timeout (default: 90000)
+	Enabled              bool         `yaml:"enabled"`                 // Enable integrated proxy mode
+	Mode                 string       `yaml:"mode"`                    // "integrated" | "nginx" (default: integrated)
+	Origin               string       `yaml:"origin"`                  // Simple single-origin mode
+	Routes               []ProxyRoute `yaml:"routes"`                  // Multi-origin routing rules
+	ChallengePath        string       `yaml:"challenge_path"`          // Challenge page path (default: /__uam)
+	TimeoutMs            int          `yaml:"timeout_ms"`              // Proxy timeout (default: 30000)
+	IdleTimeoutMs        int          `yaml:"idle_timeout_ms"`         // Idle timeout (default: 90000)
+	MaxIdleConns         int          `yaml:"max_idle_conns"`          // Max idle connections across all hosts (default: 100)
+	MaxIdleConnsPerHost  int          `yaml:"max_idle_conns_per_host"` // Max idle connections per host (default: 20)
+	MaxConnsPerHost      int          `yaml:"max_conns_per_host"`      // Max connections per host (default: 100)
 }
 
 type Config struct {
@@ -245,6 +248,15 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Proxy.IdleTimeoutMs == 0 {
 		cfg.Proxy.IdleTimeoutMs = 90000
+	}
+	if cfg.Proxy.MaxIdleConns == 0 {
+		cfg.Proxy.MaxIdleConns = 100
+	}
+	if cfg.Proxy.MaxIdleConnsPerHost == 0 {
+		cfg.Proxy.MaxIdleConnsPerHost = 20
+	}
+	if cfg.Proxy.MaxConnsPerHost == 0 {
+		cfg.Proxy.MaxConnsPerHost = 100
 	}
 	// Compile route path patterns
 	for i := range cfg.Proxy.Routes {

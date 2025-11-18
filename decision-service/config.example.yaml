@@ -112,3 +112,8 @@ proxy:
   # Proxy timeouts (in milliseconds)
   timeout_ms: 30000       # 30 seconds
   idle_timeout_ms: 90000  # 90 seconds
+
+  # Connection pool settings (tune for heavy-duty deployments)
+  max_idle_conns: 100           # Max idle connections across all hosts (default: 100)
+  max_idle_conns_per_host: 20   # Max idle connections per host (default: 20)
+  max_conns_per_host: 100       # Max connections per host (default: 100, increase for high traffic)

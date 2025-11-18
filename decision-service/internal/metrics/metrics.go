@@ -82,6 +82,30 @@ var (
 			Help: "Count of invalid clearance tokens",
 		},
 	)
+
+	// Proxy metrics (integrated mode)
+	ProxyLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "fastgate_proxy_duration_seconds",
+			Help:    "Proxy request latency by origin",
+			Buckets: []float64{0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"origin"},
+	)
+	ProxyErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_proxy_errors_total",
+			Help: "Proxy errors by origin and error type",
+		},
+		[]string{"origin", "error_type"}, // error_type: timeout, dns, connection, context, other
+	)
+	ProxyCacheOps = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_proxy_cache_total",
+			Help: "Proxy cache operations",
+		},
+		[]string{"operation"}, // operation: hit, miss, eviction, expiration
+	)
 )
 
 func MustRegister() {
@@ -97,6 +121,9 @@ func MustRegister() {
 		WebAuthnAttestation,
 		ThreatIntelMatches,
 		InvalidTokens,
+		ProxyLatency,
+		ProxyErrors,
+		ProxyCacheOps,
 	}
 
 	for _, c := range collectors {

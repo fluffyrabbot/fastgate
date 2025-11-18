@@ -180,7 +180,9 @@ func main() {
 		// Proxy handler for all other requests
 		mux.Handle("/", proxyHandler)
 
-		handler = withCommonHeaders(mux)
+		// Apply middleware chain (add more middlewares as needed)
+		// Example: handler = Chain(withLogging, withMetrics, withCommonHeaders)(mux)
+		handler = Chain(withCommonHeaders)(mux)
 	} else {
 		// NGINX mode: traditional auth_request endpoint mode
 		log.Printf("Starting in NGINX mode (auth_request)")
@@ -386,7 +388,8 @@ func main() {
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
 
-		handler = withCommonHeaders(mux)
+		// Apply middleware chain
+		handler = Chain(withCommonHeaders)(mux)
 	}
 
 	// Log feature state summary
@@ -617,6 +620,21 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 }
 
 // ---- Helpers ----
+
+// Middleware wraps an http.Handler and returns a new handler
+type Middleware func(http.Handler) http.Handler
+
+// Chain composes multiple middlewares into a single middleware
+// Middlewares are applied in the order they are provided:
+// Chain(mw1, mw2, mw3)(handler) => mw1(mw2(mw3(handler)))
+func Chain(middlewares ...Middleware) Middleware {
+	return func(final http.Handler) http.Handler {
+		for i := len(middlewares) - 1; i >= 0; i-- {
+			final = middlewares[i](final)
+		}
+		return final
+	}
+}
 
 func withCommonHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
