@@ -395,6 +395,18 @@ func (c *Config) Validate() error {
 		if c.Proxy.IdleTimeoutMs <= 0 || c.Proxy.IdleTimeoutMs > 600000 {
 			return errors.New("proxy.idle_timeout_ms must be in (0, 600000]")
 		}
+		// Validate challenge path
+		if c.Proxy.ChallengePath != "" {
+			if !strings.HasPrefix(c.Proxy.ChallengePath, "/") {
+				return errors.New("proxy.challenge_path must start with /")
+			}
+			if strings.Contains(c.Proxy.ChallengePath, "..") {
+				return errors.New("proxy.challenge_path must not contain ..")
+			}
+			if strings.Contains(c.Proxy.ChallengePath, "//") {
+				return errors.New("proxy.challenge_path must not contain //")
+			}
+		}
 		// Validate that either origin or routes is specified
 		if c.Proxy.Origin == "" && len(c.Proxy.Routes) == 0 {
 			return errors.New("proxy.origin or proxy.routes required when proxy.enabled")

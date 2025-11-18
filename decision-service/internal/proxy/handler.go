@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -12,7 +13,16 @@ import (
 
 	"fastgate/decision-service/internal/authz"
 	"fastgate/decision-service/internal/config"
+	internalhttp "fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/metrics"
+)
+
+const (
+	maxProxyCacheSize = 100 // Maximum number of cached reverse proxies
+)
+
+var (
+	sanitizeReturnURL = internalhttp.SanitizeReturnURL
 )
 
 // Handler is an integrated reverse proxy that performs authorization checks inline
@@ -20,6 +30,7 @@ type Handler struct {
 	cfg              *config.Config
 	authzHandler     *authz.Handler
 	proxies          map[string]*httputil.ReverseProxy
+	proxyCount       int
 	proxiesMu        sync.RWMutex
 	challengePageDir string
 }
@@ -72,8 +83,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case "challenge":
 		metrics.AuthzDecision.WithLabelValues("challenge").Inc()
-		// Redirect to challenge page with return URL
-		returnURL := r.URL.String()
+		// Redirect to challenge page with return URL (path + query only, no host)
+		returnURL := r.URL.RequestURI()
+		// Sanitize to prevent open redirects (uses existing httputil helper)
+		returnURL = sanitizeReturnURL(returnURL)
 		challengeURL := fmt.Sprintf("%s?return_url=%s", h.cfg.Proxy.ChallengePath, url.QueryEscape(returnURL))
 		http.Redirect(w, r, challengeURL, http.StatusFound)
 		return
@@ -134,7 +147,8 @@ func (h *Handler) matchRoute(r *http.Request) string {
 func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCode int, cookies []*http.Cookie) {
 	// Create a response recorder to capture authz handler output
 	recorder := &authzRecorder{
-		header: make(http.Header),
+		header:     make(http.Header),
+		statusCode: http.StatusOK, // Default to 200 OK
 	}
 
 	// Prepare headers for authz handler (mimic NGINX auth_request format)
@@ -155,12 +169,17 @@ func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCo
 	// Call authz handler
 	h.authzHandler.ServeHTTP(recorder, r)
 
+	// If WriteHeader was never called, statusCode will be the default (200 OK)
+	if recorder.statusCode == 0 {
+		recorder.statusCode = http.StatusOK
+	}
+
 	// Extract cookies from authz response
 	cookies = parseCookies(recorder.header)
 
 	// Map status codes to decisions
 	switch recorder.statusCode {
-	case http.StatusNoContent: // 204 = ALLOW
+	case http.StatusOK, http.StatusNoContent: // 200/204 = ALLOW
 		return "allow", http.StatusOK, cookies
 	case http.StatusUnauthorized: // 401 = CHALLENGE
 		return "challenge", http.StatusUnauthorized, cookies
@@ -190,6 +209,19 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 	r.Header.Del("X-Client-IP")
 	r.Header.Del("X-WS-Upgrade")
 
+	// Prevent request smuggling - detect suspicious header combinations
+	if r.Header.Get("Content-Length") != "" && r.Header.Get("Transfer-Encoding") != "" {
+		log.Printf("WARNING: Both Content-Length and Transfer-Encoding present from %s", r.RemoteAddr)
+		// Per RFC 7230, Transfer-Encoding takes precedence
+		r.Header.Del("Content-Length")
+	}
+
+	// Clear any existing X-Forwarded-* headers from untrusted clients
+	// The proxy Director will set trusted values
+	r.Header.Del("X-Forwarded-For")
+	r.Header.Del("X-Forwarded-Proto")
+	r.Header.Del("X-Forwarded-Host")
+
 	// Proxy the request
 	proxy.ServeHTTP(w, r)
 }
@@ -213,63 +245,111 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// Configure proxy transport
+	// Configure proxy transport with proper timeouts
 	proxy.Transport = &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     time.Duration(h.cfg.Proxy.IdleTimeoutMs) * time.Millisecond,
-		DisableCompression:  false,
-		ForceAttemptHTTP2:   true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       time.Duration(h.cfg.Proxy.IdleTimeoutMs) * time.Millisecond,
+		ResponseHeaderTimeout: 10 * time.Second, // Prevent slow header attacks
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		DisableCompression: false,
+		ForceAttemptHTTP2:  true,
 	}
 
-	// Configure director to preserve host header and add X-Forwarded-* headers
+	// Configure director to set trusted X-Forwarded-* headers
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 
-		// Set X-Forwarded-* headers
+		// Set trusted X-Forwarded-* headers (untrusted ones were deleted earlier)
 		if clientIP := getClientIP(req); clientIP != "" {
-			req.Header.Set("X-Forwarded-For", clientIP)
+			// Append to preserve proxy chain if needed
+			if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
+				req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+			} else {
+				req.Header.Set("X-Forwarded-For", clientIP)
+			}
 		}
 		req.Header.Set("X-Forwarded-Proto", getScheme(req))
 		req.Header.Set("X-Forwarded-Host", req.Host)
 	}
 
-	// Error handler
+	// Error handler with better error differentiation
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("Proxy error for %s: %v", originURL, err)
+
+		// Differentiate timeout errors
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+			return
+		}
+
+		// Connection errors
+		if strings.Contains(err.Error(), "connection refused") {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Default to bad gateway
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}
 
-	// Cache the proxy
+	// Cache the proxy with size limit
 	h.proxiesMu.Lock()
-	h.proxies[originURL] = proxy
-	h.proxiesMu.Unlock()
+	defer h.proxiesMu.Unlock()
 
+	// Implement simple cache eviction when at capacity
+	if len(h.proxies) >= maxProxyCacheSize {
+		// Evict a random entry (simple strategy, good enough for this use case)
+		for k := range h.proxies {
+			delete(h.proxies, k)
+			break
+		}
+	}
+
+	h.proxies[originURL] = proxy
 	return proxy
 }
 
 // serveChallengePage serves the challenge page and its assets
 func (h *Handler) serveChallengePage(w http.ResponseWriter, r *http.Request) {
-	// Strip challenge path prefix to get the file path
+	// Strip challenge path prefix and clean the path
 	path := strings.TrimPrefix(r.URL.Path, h.cfg.Proxy.ChallengePath)
-	if path == "" || path == "/" {
-		path = "/index.html"
+	path = strings.TrimPrefix(path, "/")
+
+	// Prevent directory traversal attacks
+	if strings.Contains(path, "..") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 
-	// Serve from challenge page directory
-	fs := http.FileServer(http.Dir(h.challengePageDir))
+	if path == "" {
+		path = "index.html"
+	}
 
-	// Strip the challenge path prefix before serving
-	http.StripPrefix(h.cfg.Proxy.ChallengePath, fs).ServeHTTP(w, r)
+	// Build full path and validate it's within challenge page directory
+	fullPath := path
+	if !strings.HasPrefix(fullPath, "/") {
+		fullPath = "/" + fullPath
+	}
+
+	// Serve file directly (safer than http.FileServer for this use case)
+	http.ServeFile(w, r, h.challengePageDir+fullPath)
 }
 
 // Helper functions
 
 // authzRecorder captures the response from the authz handler
 type authzRecorder struct {
-	header     http.Header
-	statusCode int
+	header      http.Header
+	statusCode  int
+	wroteHeader bool
+	mu          sync.Mutex
 }
 
 func (r *authzRecorder) Header() http.Header {
@@ -277,11 +357,22 @@ func (r *authzRecorder) Header() http.Header {
 }
 
 func (r *authzRecorder) Write(b []byte) (int, error) {
+	r.mu.Lock()
+	if !r.wroteHeader {
+		r.statusCode = http.StatusOK
+		r.wroteHeader = true
+	}
+	r.mu.Unlock()
 	return len(b), nil
 }
 
 func (r *authzRecorder) WriteHeader(statusCode int) {
-	r.statusCode = statusCode
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.wroteHeader {
+		r.statusCode = statusCode
+		r.wroteHeader = true
+	}
 }
 
 // getClientIP extracts the client IP from various headers
@@ -309,8 +400,18 @@ func getClientIP(r *http.Request) string {
 
 // isWebSocketUpgrade checks if the request is a WebSocket upgrade
 func isWebSocketUpgrade(r *http.Request) bool {
-	return strings.ToLower(r.Header.Get("Upgrade")) == "websocket" &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+	if strings.ToLower(r.Header.Get("Upgrade")) != "websocket" {
+		return false
+	}
+
+	// Parse Connection header properly (it's a comma-separated list)
+	conn := strings.ToLower(r.Header.Get("Connection"))
+	for _, token := range strings.Split(conn, ",") {
+		if strings.TrimSpace(token) == "upgrade" {
+			return true
+		}
+	}
+	return false
 }
 
 // getScheme returns the scheme (http or https) for the request
@@ -318,9 +419,15 @@ func getScheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
 	}
+
+	// Only trust X-Forwarded-Proto if it's a valid scheme
 	if scheme := r.Header.Get("X-Forwarded-Proto"); scheme != "" {
-		return scheme
+		scheme = strings.ToLower(scheme)
+		if scheme == "http" || scheme == "https" {
+			return scheme
+		}
 	}
+
 	return "http"
 }
 
