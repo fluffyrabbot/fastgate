@@ -128,7 +128,7 @@ func MustRegister() {
 
 	for _, c := range collectors {
 		if err := prometheus.Register(c); err != nil {
-			// Ignore AlreadyRegisteredError (happens on hot reload/restart in tests)
+			// Ignore AlreadyRegisteredError (happens on restart in tests)
 			if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
 				log.Fatalf("Failed to register metric: %v", err)
 			}

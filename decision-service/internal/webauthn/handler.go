@@ -216,7 +216,7 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set cookie
-	http.SetCookie(w, buildCookie(h.Config, tokenStr))
+	http.SetCookie(w, httputil.BuildCookie(h.Config, tokenStr))
 
 	// Sanitize and redirect to return URL
 	returnURL = sanitizeReturnURL(returnURL)
@@ -241,31 +241,6 @@ func isHardwareBacked(attestationType string) bool {
 	default:
 		return false
 	}
-}
-
-// buildCookie creates a clearance cookie.
-func buildCookie(cfg *config.Config, tokenStr string) *http.Cookie {
-	c := &http.Cookie{
-		Name:     cfg.Cookie.Name,
-		Value:    tokenStr,
-		Path:     cfg.Cookie.Path,
-		MaxAge:   cfg.Cookie.MaxAgeSec,
-		Secure:   cfg.Cookie.Secure,
-		HttpOnly: cfg.Cookie.HTTPOnly,
-	}
-
-	switch cfg.Cookie.SameSite {
-	case "None":
-		c.SameSite = http.SameSiteNoneMode
-	default:
-		c.SameSite = http.SameSiteLaxMode
-	}
-
-	if cfg.Cookie.Domain != "" {
-		c.Domain = cfg.Cookie.Domain
-	}
-
-	return c
 }
 
 // Use httputil package for shared helpers

@@ -62,11 +62,6 @@ type PolicyCfg struct {
 	} `yaml:"ws_concurrency_limits"`
 }
 
-type RateStoreCfg struct {
-	Backend  string `yaml:"backend"`  // memory | redis (future)
-	RedisDSN string `yaml:"redis_dsn"`
-}
-
 type ChallengeCfg struct {
 	DifficultyBits int `yaml:"difficulty_bits"`
 	TTLSec         int `yaml:"ttl_sec"`
@@ -75,25 +70,6 @@ type ChallengeCfg struct {
 
 type LoggingCfg struct {
 	Level string `yaml:"level"` // info|debug
-}
-
-type AttestationCfg struct {
-	Enabled  bool   `yaml:"enabled"`
-	Provider string `yaml:"provider"`   // "privpass" (Privacy Pass / PAT-style)
-	Header   string `yaml:"header"`     // e.g., "Private-Token" or "Authorization"
-	Cookie   string `yaml:"cookie"`     // optional fallback cookie
-	Audience string `yaml:"audience"`   // optional hint to redemption
-	Issuer   string `yaml:"issuer"`     // optional hint to redemption
-	Tier     string `yaml:"tier"`       // resulting clearance tier (default "attested")
-	MaxTTLSec int   `yaml:"max_ttl_sec"` // clamp clearance TTL
-	Cache struct {
-		Capacity int `yaml:"capacity"`
-		TTLSec   int `yaml:"ttl_sec"`
-	} `yaml:"cache"`
-	Redemption struct {
-		Endpoint  string `yaml:"endpoint"`   // https://issuer.example/redeem
-		TimeoutMs int    `yaml:"timeout_ms"` // default 400ms
-	} `yaml:"redemption"`
 }
 
 type WebAuthnCfg struct {
@@ -151,10 +127,8 @@ type Config struct {
 	Cookie      CookieCfg        `yaml:"cookie"`
 	Token       TokenCfg         `yaml:"token"`
 	Policy      PolicyCfg        `yaml:"policy"`
-	RateStore   RateStoreCfg     `yaml:"rate_store"`
 	Challenge   ChallengeCfg     `yaml:"challenge"`
 	Logging     LoggingCfg       `yaml:"logging"`
-	Attestation AttestationCfg   `yaml:"attestation"`
 	WebAuthn    WebAuthnCfg      `yaml:"webauthn"`
 	ThreatIntel ThreatIntelCfg   `yaml:"threat_intel"`
 	Proxy       ProxyCfg         `yaml:"proxy"`
@@ -209,25 +183,6 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
-	}
-	// Attestation defaults
-	if cfg.Attestation.Header == "" {
-		cfg.Attestation.Header = "Private-Token"
-	}
-	if cfg.Attestation.Tier == "" {
-		cfg.Attestation.Tier = "attested"
-	}
-	if cfg.Attestation.MaxTTLSec == 0 {
-		cfg.Attestation.MaxTTLSec = 24 * 3600
-	}
-	if cfg.Attestation.Cache.Capacity == 0 {
-		cfg.Attestation.Cache.Capacity = 100_000
-	}
-	if cfg.Attestation.Cache.TTLSec == 0 {
-		cfg.Attestation.Cache.TTLSec = 3600
-	}
-	if cfg.Attestation.Redemption.TimeoutMs == 0 {
-		cfg.Attestation.Redemption.TimeoutMs = 400
 	}
 	// WebAuthn defaults
 	if cfg.WebAuthn.RPName == "" {
@@ -343,12 +298,6 @@ func (c *Config) Validate() error {
 	}
 	if _, ok := c.Token.Keys[c.Token.CurrentKID]; !ok {
 		return errors.New("token.current_kid not found in token.keys")
-	}
-
-	// Attestation validation
-	if c.Attestation.Enabled {
-		// Attestation not yet implemented - fail early
-		return errors.New("attestation feature is not yet implemented - please set attestation.enabled=false")
 	}
 
 	// WebAuthn validation

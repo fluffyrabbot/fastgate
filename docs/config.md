@@ -34,11 +34,7 @@ Copy `decision-service/config.example.yaml` to your own config and set `FASTGATE
 - `peers: [...]` — List of TAXII peer servers to subscribe to.
 - `auto_publish: true|false` — Automatically share local attack indicators with peers.
 
-## Behavioral Entropy Analysis
-- `enabled: true|false` — Enable behavioral entropy fingerprinting.
-- `bot_likelihood_block: 0.90` — Block threshold (0.0-1.0). Clients scoring above this are blocked.
-- `bot_likelihood_challenge: 0.50` — Challenge threshold (0.0-1.0). Clients scoring above this get challenged.
-- `collect_signals: {...}` — Configure which behavioral signals to collect (mouse, keyboard, timing, etc.).
+**Note:** Behavioral entropy analysis is automatically applied during PoW challenge completion. The entropy analyzer uses hardcoded thresholds (bot_likelihood >= 0.7 triggers challenge tier adjustment, >= 0.9 triggers block). No configuration is needed.
 
 ## Key rotation
 - Add a new `kid` to `token.keys`, set `current_kid` to the new key, keep the old one for at least cookie TTL, then remove it.

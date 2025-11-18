@@ -43,10 +43,6 @@ policy:
     per_ip: 20
     per_token: 40
 
-rate_store:
-  backend: "memory"    # memory | redis
-  redis_dsn: ""
-
 challenge:
   difficulty_bits: 16  # keep small for dev; raise in prod (e.g., 18-20)
   ttl_sec: 60

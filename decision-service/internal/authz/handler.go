@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
@@ -57,7 +58,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Short-circuit in Observe mode: allow and opportunistically set cookie.
 	if !h.Cfg.Modes.Enforce {
 		if tokenStr, err := h.Keyring.Sign("low", h.Cfg.CookieMaxAge()); err == nil {
-			http.SetCookie(w, buildCookie(h.Cfg, tokenStr))
+			http.SetCookie(w, httputil.BuildCookie(h.Cfg, tokenStr))
 			metrics.ClearanceIssued.Inc()
 		}
 		metrics.AuthzDecision.WithLabelValues("allow").Inc()
@@ -118,7 +119,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		metrics.AuthzDecision.WithLabelValues("allow").Inc()
 		// No need to reissue cookie; it's already valid, but refreshing is OK to reduce future near-expiry.
 		if tokenStr, err := h.Keyring.Sign("low", h.Cfg.CookieMaxAge()); err == nil {
-			http.SetCookie(w, buildCookie(h.Cfg, tokenStr))
+			http.SetCookie(w, httputil.BuildCookie(h.Cfg, tokenStr))
 			metrics.ClearanceIssued.Inc()
 		}
 		// Auto-release leases.
@@ -184,7 +185,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ALLOW path: issue clearance; for WS, enforce per-IP (no-token) concurrency caps.
 	tokenStr, err := h.Keyring.Sign("low", h.Cfg.CookieMaxAge())
 	if err == nil {
-		http.SetCookie(w, buildCookie(h.Cfg, tokenStr))
+		http.SetCookie(w, httputil.BuildCookie(h.Cfg, tokenStr))
 		metrics.ClearanceIssued.Inc()
 	}
 	if wsUpgrade {
@@ -391,27 +392,6 @@ func setReasonHeaders(w http.ResponseWriter, reasons []string, score int) {
 		w.Header().Set("X-FastGate-Reason", strings.Join(reasons, ","))
 	}
 	w.Header().Set("X-FastGate-Score", strconv.Itoa(score))
-}
-
-func buildCookie(cfg *config.Config, val string) *http.Cookie {
-	c := &http.Cookie{
-		Name:     cfg.Cookie.Name,
-		Value:    val,
-		Path:     cfg.Cookie.Path,
-		MaxAge:   cfg.Cookie.MaxAgeSec,
-		Secure:   cfg.Cookie.Secure,
-		HttpOnly: cfg.Cookie.HTTPOnly,
-	}
-	switch strings.ToLower(cfg.Cookie.SameSite) {
-	case "none":
-		c.SameSite = http.SameSiteNoneMode
-	default:
-		c.SameSite = http.SameSiteLaxMode
-	}
-	if cfg.Cookie.Domain != "" {
-		c.Domain = cfg.Cookie.Domain
-	}
-	return c
 }
 
 // publishThreat publishes a blocked IP to the threat intelligence feed

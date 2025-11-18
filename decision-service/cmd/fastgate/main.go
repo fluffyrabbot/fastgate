@@ -350,7 +350,7 @@ func main() {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 			return
 		}
-		http.SetCookie(w, buildCookie(cfg, tokenStr))
+		http.SetCookie(w, httputil.BuildCookie(cfg, tokenStr))
 		metrics.ChallengeSolved.Inc()
 
 		if cfg.Logging.Level == "debug" {
@@ -605,7 +605,7 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
 	}
-	http.SetCookie(w, buildCookie(cfg, tokenStr))
+	http.SetCookie(w, httputil.BuildCookie(cfg, tokenStr))
 	metrics.ChallengeSolved.Inc()
 
 	if cfg.Logging.Level == "debug" {
@@ -672,25 +672,3 @@ func newResponseRecorder() *responseRecorder                  { return &response
 func (r *responseRecorder) Header() http.Header               { return r.h }
 func (r *responseRecorder) Write(b []byte) (int, error)       { return len(b), nil }
 func (r *responseRecorder) WriteHeader(statusCode int)        {}
-
-// Cookie builder (duplicate of authz helper for isolation)
-func buildCookie(cfg *config.Config, tokenStr string) *http.Cookie {
-	c := &http.Cookie{
-		Name:     cfg.Cookie.Name,
-		Value:    tokenStr,
-		Path:     cfg.Cookie.Path,
-		MaxAge:   cfg.Cookie.MaxAgeSec,
-		Secure:   cfg.Cookie.Secure,
-		HttpOnly: cfg.Cookie.HTTPOnly,
-	}
-	switch strings.ToLower(cfg.Cookie.SameSite) {
-	case "none":
-		c.SameSite = http.SameSiteNoneMode
-	default:
-		c.SameSite = http.SameSiteLaxMode
-	}
-	if cfg.Cookie.Domain != "" {
-		c.Domain = cfg.Cookie.Domain
-	}
-	return c
-}

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"fastgate/decision-service/internal/config"
 )
 
 // SanitizeReturnURL prevents open redirect attacks by restricting to same-origin paths.
@@ -63,4 +65,26 @@ func WriteJSON(w http.ResponseWriter, code int, v any) {
 	if err := enc.Encode(v); err != nil {
 		log.Printf("ERROR: JSON encode failed: %v", err)
 	}
+}
+
+// BuildCookie creates a cookie with the configured security settings.
+func BuildCookie(cfg *config.Config, value string) *http.Cookie {
+	c := &http.Cookie{
+		Name:     cfg.Cookie.Name,
+		Value:    value,
+		Path:     cfg.Cookie.Path,
+		MaxAge:   cfg.Cookie.MaxAgeSec,
+		Secure:   cfg.Cookie.Secure,
+		HttpOnly: cfg.Cookie.HTTPOnly,
+	}
+	switch strings.ToLower(cfg.Cookie.SameSite) {
+	case "none":
+		c.SameSite = http.SameSiteNoneMode
+	default:
+		c.SameSite = http.SameSiteLaxMode
+	}
+	if cfg.Cookie.Domain != "" {
+		c.Domain = cfg.Cookie.Domain
+	}
+	return c
 }
