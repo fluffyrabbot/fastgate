@@ -1,12 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,19 +20,26 @@ import (
 )
 
 const (
-	maxProxyCacheSize = 100 // Maximum number of cached reverse proxies
+	maxProxyCacheSize = 100                 // Maximum number of cached reverse proxies
+	maxProxyBodySize  = 100 * 1024 * 1024   // 100MB max for proxied request bodies
+	proxyCacheTTL     = 5 * time.Minute     // TTL for cached proxies (DNS change handling)
 )
 
 var (
 	sanitizeReturnURL = internalhttp.SanitizeReturnURL
 )
 
+// cachedProxy wraps a reverse proxy with metadata
+type cachedProxy struct {
+	proxy     *httputil.ReverseProxy
+	createdAt time.Time
+}
+
 // Handler is an integrated reverse proxy that performs authorization checks inline
 type Handler struct {
 	cfg              *config.Config
 	authzHandler     *authz.Handler
-	proxies          map[string]*httputil.ReverseProxy
-	proxyCount       int
+	proxies          map[string]*cachedProxy
 	proxiesMu        sync.RWMutex
 	challengePageDir string
 }
@@ -41,10 +50,15 @@ func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDi
 		return nil, fmt.Errorf("proxy mode not enabled in config")
 	}
 
+	// Validate challenge page directory exists
+	if _, err := os.Stat(challengePageDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("challenge page directory does not exist: %s", challengePageDir)
+	}
+
 	h := &Handler{
 		cfg:              cfg,
 		authzHandler:     authzHandler,
-		proxies:          make(map[string]*httputil.ReverseProxy),
+		proxies:          make(map[string]*cachedProxy),
 		challengePageDir: challengePageDir,
 	}
 
@@ -203,6 +217,9 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 		return
 	}
 
+	// Limit request body size to prevent memory exhaustion
+	r.Body = http.MaxBytesReader(w, r.Body, maxProxyBodySize)
+
 	// Clean up auth-request headers before proxying
 	r.Header.Del("X-Original-Method")
 	r.Header.Del("X-Original-URI")
@@ -230,11 +247,25 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 	// Check if we already have a proxy for this origin
 	h.proxiesMu.RLock()
-	if proxy, ok := h.proxies[originURL]; ok {
+	if cp, ok := h.proxies[originURL]; ok {
+		// Check if proxy is still fresh (TTL-based expiration for DNS updates)
+		if time.Since(cp.createdAt) < proxyCacheTTL {
+			h.proxiesMu.RUnlock()
+			return cp.proxy
+		}
+		// Expired, need to recreate (drop lock to avoid deadlock)
 		h.proxiesMu.RUnlock()
-		return proxy
+
+		// Clean up expired proxy
+		h.proxiesMu.Lock()
+		if transport, ok := cp.proxy.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
+		delete(h.proxies, originURL)
+		h.proxiesMu.Unlock()
+	} else {
+		h.proxiesMu.RUnlock()
 	}
-	h.proxiesMu.RUnlock()
 
 	// Create new proxy
 	target, err := url.Parse(originURL)
@@ -245,13 +276,15 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// Configure proxy transport with proper timeouts
+	// Configure proxy transport with configurable timeouts
+	timeoutDuration := time.Duration(h.cfg.Proxy.TimeoutMs) * time.Millisecond
 	proxy.Transport = &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
+		MaxConnsPerHost:       100, // Prevent connection exhaustion
 		IdleConnTimeout:       time.Duration(h.cfg.Proxy.IdleTimeoutMs) * time.Millisecond,
-		ResponseHeaderTimeout: 10 * time.Second, // Prevent slow header attacks
-		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: timeoutDuration,
+		TLSHandshakeTimeout:   timeoutDuration / 3, // 1/3 of total timeout for handshake
 		ExpectContinueTimeout: 1 * time.Second,
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
@@ -279,13 +312,28 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 		req.Header.Set("X-Forwarded-Host", req.Host)
 	}
 
-	// Error handler with better error differentiation
+	// Error handler with error differentiation and context handling
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// Client disconnected - don't log as error
+		if err == context.Canceled || err == context.DeadlineExceeded {
+			if h.cfg.Logging.Level == "debug" {
+				log.Printf("Proxy request canceled: %v", err)
+			}
+			return
+		}
+
 		log.Printf("Proxy error for %s: %v", originURL, err)
 
 		// Differentiate timeout errors
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+			return
+		}
+
+		// DNS errors
+		if dnsErr, ok := err.(*net.DNSError); ok {
+			log.Printf("DNS resolution failed for %s: %v", originURL, dnsErr)
+			http.Error(w, "service unavailable: DNS error", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -299,21 +347,43 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}
 
-	// Cache the proxy with size limit
+	// Cache the proxy with size limit and TTL
 	h.proxiesMu.Lock()
 	defer h.proxiesMu.Unlock()
 
 	// Implement simple cache eviction when at capacity
 	if len(h.proxies) >= maxProxyCacheSize {
-		// Evict a random entry (simple strategy, good enough for this use case)
+		// Evict first entry (simple strategy, good enough for this use case)
 		for k := range h.proxies {
+			if transport, ok := h.proxies[k].proxy.Transport.(*http.Transport); ok {
+				transport.CloseIdleConnections()
+			}
 			delete(h.proxies, k)
 			break
 		}
 	}
 
-	h.proxies[originURL] = proxy
+	h.proxies[originURL] = &cachedProxy{
+		proxy:     proxy,
+		createdAt: time.Now(),
+	}
 	return proxy
+}
+
+// Shutdown gracefully shuts down the proxy handler
+func (h *Handler) Shutdown(ctx context.Context) error {
+	h.proxiesMu.Lock()
+	defer h.proxiesMu.Unlock()
+
+	// Close idle connections in all transports
+	for origin, cp := range h.proxies {
+		if transport, ok := cp.proxy.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+			log.Printf("Closed idle connections for origin: %s", origin)
+		}
+	}
+
+	return nil
 }
 
 // serveChallengePage serves the challenge page and its assets
@@ -322,11 +392,20 @@ func (h *Handler) serveChallengePage(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, h.cfg.Proxy.ChallengePath)
 	path = strings.TrimPrefix(path, "/")
 
-	// Prevent directory traversal attacks
-	if strings.Contains(path, "..") {
+	// URL-decode to catch encoded traversal attempts
+	decodedPath, err := url.QueryUnescape(path)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Prevent directory traversal attacks (check both original and decoded)
+	if strings.Contains(decodedPath, "..") || strings.Contains(path, "..") {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+
+	path = decodedPath
 
 	if path == "" {
 		path = "index.html"
@@ -381,12 +460,22 @@ func getClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		// Take the first IP in the chain
 		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
+		ip := strings.TrimSpace(parts[0])
+
+		// Validate it's a real IP address
+		if parsedIP := net.ParseIP(ip); parsedIP != nil {
+			return ip
+		}
+		// Invalid IP in XFF, fall through to RemoteAddr
 	}
 
 	// Try X-Real-IP
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
+		// Validate it's a real IP address
+		if parsedIP := net.ParseIP(xri); parsedIP != nil {
+			return xri
+		}
+		// Invalid IP in X-Real-IP, fall through
 	}
 
 	// Fall back to RemoteAddr

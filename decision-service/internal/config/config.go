@@ -13,6 +13,9 @@ import (
 
 type ServerCfg struct {
 	Listen         string `yaml:"listen"`
+	TLSEnabled     bool   `yaml:"tls_enabled"`
+	TLSCertFile    string `yaml:"tls_cert_file"`
+	TLSKeyFile     string `yaml:"tls_key_file"`
 	ReadTimeoutMs  int    `yaml:"read_timeout_ms"`
 	WriteTimeoutMs int    `yaml:"write_timeout_ms"`
 }
@@ -269,6 +272,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.write_timeout_ms must be in (0, 300000], got %d", c.Server.WriteTimeoutMs)
 	}
 
+	// TLS validation
+	if c.Server.TLSEnabled {
+		if c.Server.TLSCertFile == "" {
+			return errors.New("server.tls_cert_file required when tls_enabled=true")
+		}
+		if c.Server.TLSKeyFile == "" {
+			return errors.New("server.tls_key_file required when tls_enabled=true")
+		}
+	}
+
+	// Warn if cookies require HTTPS but TLS not enabled
+	if c.Cookie.Secure && !c.Server.TLSEnabled {
+		fmt.Println("WARNING: cookie.secure=true but TLS not enabled - cookies won't be sent")
+	}
+
 	// Policy thresholds
 	if c.Policy.BlockThreshold <= c.Policy.ChallengeThreshold {
 		return fmt.Errorf("policy.block_threshold (%d) must be > challenge_threshold (%d)", c.Policy.BlockThreshold, c.Policy.ChallengeThreshold)
@@ -317,21 +335,8 @@ func (c *Config) Validate() error {
 
 	// Attestation validation
 	if c.Attestation.Enabled {
-		if c.Attestation.Provider != "privpass" {
-			return errors.New("attestation.provider must be 'privpass' (for Privacy Pass/PAT-style)")
-		}
-		if c.Attestation.Redemption.Endpoint == "" {
-			return errors.New("attestation.redemption.endpoint required when attestation.enabled")
-		}
-		if c.Attestation.Header == "" && c.Attestation.Cookie == "" {
-			return errors.New("attestation.header or attestation.cookie required")
-		}
-		if c.Attestation.Cache.Capacity < 1000 || c.Attestation.Cache.Capacity > 1000000 {
-			return errors.New("attestation.cache.capacity must be in [1000, 1000000]")
-		}
-		if c.Attestation.Cache.TTLSec <= 0 || c.Attestation.Cache.TTLSec > 86400 {
-			return errors.New("attestation.cache.ttl_sec must be in (0, 86400]")
-		}
+		// Attestation not yet implemented - fail early
+		return errors.New("attestation feature is not yet implemented - please set attestation.enabled=false")
 	}
 
 	// WebAuthn validation

@@ -109,6 +109,7 @@ func main() {
 
 	// Check if we're using integrated proxy mode
 	var handler http.Handler
+	var proxyHandler *proxy.Handler // Store reference for shutdown
 	if cfg.Proxy.Enabled && cfg.Proxy.Mode == "integrated" {
 		// Integrated proxy mode: all requests go through proxy handler
 		log.Printf("Starting in integrated proxy mode")
@@ -120,10 +121,11 @@ func main() {
 		}
 
 		// Create integrated proxy handler
-		proxyHandler, err := proxy.NewHandler(cfg, authzHandler, challengePageDir)
+		ph, err := proxy.NewHandler(cfg, authzHandler, challengePageDir)
 		if err != nil {
 			log.Fatalf("proxy handler: %v", err)
 		}
+		proxyHandler = ph
 
 		// Create mux for API endpoints and proxy
 		mux := http.NewServeMux()
@@ -386,7 +388,13 @@ func main() {
 	serverErrors := make(chan error, 1)
 	go func() {
 		log.Printf("FastGate Decision Service listening on %s (challenge cap ~%dk, RPS guard %.1f/s per IP)", cfg.Server.Listen, defaultChallengeStoreCap/1000, maxChallengeStartsRPSPerIP)
-		serverErrors <- srv.ListenAndServe()
+		if cfg.Server.TLSEnabled {
+			log.Printf("Starting with TLS (cert: %s, key: %s)", cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+			serverErrors <- srv.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		} else {
+			log.Printf("Starting without TLS (WARNING: use TLS in production)")
+			serverErrors <- srv.ListenAndServe()
+		}
 	}()
 
 	// Signal handler for graceful shutdown
@@ -411,6 +419,13 @@ func main() {
 		// Close intel store
 		if intelStore != nil {
 			intelStore.Close()
+		}
+
+		// Shutdown proxy handler (if in integrated mode)
+		if proxyHandler != nil {
+			if err := proxyHandler.Shutdown(ctx); err != nil {
+				log.Printf("Proxy shutdown error: %v", err)
+			}
 		}
 
 		// Gracefully shutdown HTTP server
@@ -588,9 +603,22 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 
 func withCommonHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Security & cache headers for API endpoints
+		// Security & cache headers
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+
+		// Only set HSTS if TLS is enabled
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		// CSP for API endpoints (not proxied content)
+		if strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/taxii2/") || strings.HasPrefix(r.URL.Path, "/metrics") {
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
