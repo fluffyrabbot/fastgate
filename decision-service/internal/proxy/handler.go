@@ -425,10 +425,9 @@ func (h *Handler) serveChallengePage(w http.ResponseWriter, r *http.Request) {
 
 // authzRecorder captures the response from the authz handler
 type authzRecorder struct {
-	header      http.Header
-	statusCode  int
-	wroteHeader bool
-	mu          sync.Mutex
+	header     http.Header
+	statusCode int
+	writeOnce  sync.Once
 }
 
 func (r *authzRecorder) Header() http.Header {
@@ -436,22 +435,16 @@ func (r *authzRecorder) Header() http.Header {
 }
 
 func (r *authzRecorder) Write(b []byte) (int, error) {
-	r.mu.Lock()
-	if !r.wroteHeader {
+	r.writeOnce.Do(func() {
 		r.statusCode = http.StatusOK
-		r.wroteHeader = true
-	}
-	r.mu.Unlock()
+	})
 	return len(b), nil
 }
 
 func (r *authzRecorder) WriteHeader(statusCode int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.wroteHeader {
+	r.writeOnce.Do(func() {
 		r.statusCode = statusCode
-		r.wroteHeader = true
-	}
+	})
 }
 
 // getClientIP extracts the client IP from various headers

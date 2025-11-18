@@ -414,7 +414,21 @@ func (c *Config) Validate() error {
 		}
 		// Validate that either origin or routes is specified
 		if c.Proxy.Origin == "" && len(c.Proxy.Routes) == 0 {
-			return errors.New("proxy.origin or proxy.routes required when proxy.enabled")
+			return errors.New("proxy.origin or proxy.routes required when proxy.enabled\n" +
+				"  Example single-origin:\n" +
+				"    proxy:\n" +
+				"      enabled: true\n" +
+				"      mode: integrated\n" +
+				"      origin: \"http://localhost:3000\"\n" +
+				"  Example multi-origin:\n" +
+				"    proxy:\n" +
+				"      enabled: true\n" +
+				"      mode: integrated\n" +
+				"      routes:\n" +
+				"        - host: \"app.example.com\"\n" +
+				"          origin: \"http://localhost:3000\"\n" +
+				"        - path: \"^/api/\"\n" +
+				"          origin: \"http://localhost:4000\"")
 		}
 		// Validate origin URL format
 		if c.Proxy.Origin != "" {
@@ -425,13 +439,17 @@ func (c *Config) Validate() error {
 		// Validate route configurations
 		for i, route := range c.Proxy.Routes {
 			if route.Host == "" && route.Path == "" {
-				return fmt.Errorf("proxy.routes[%d]: either host or path required", i)
+				return fmt.Errorf("proxy.routes[%d]: either host or path required\n"+
+					"  Example: host: \"app.example.com\" or path: \"^/api/\"", i)
 			}
 			if route.Origin == "" {
-				return fmt.Errorf("proxy.routes[%d].origin required", i)
+				return fmt.Errorf("proxy.routes[%d].origin required\n"+
+					"  Example: origin: \"http://localhost:3000\"", i)
 			}
 			if !strings.HasPrefix(route.Origin, "http://") && !strings.HasPrefix(route.Origin, "https://") {
-				return fmt.Errorf("proxy.routes[%d].origin must start with http:// or https://", i)
+				return fmt.Errorf("proxy.routes[%d].origin must start with http:// or https://\n"+
+					"  Got: %q\n"+
+					"  Example: origin: \"http://localhost:3000\"", i, route.Origin)
 			}
 		}
 	}

@@ -127,6 +127,23 @@ func main() {
 		}
 		proxyHandler = ph
 
+		// Log proxy routing configuration
+		log.Printf("Proxy routing configuration:")
+		if cfg.Proxy.Origin != "" {
+			log.Printf("  - Mode: single-origin → %s", cfg.Proxy.Origin)
+		} else {
+			log.Printf("  - Mode: multi-origin (%d routes)", len(cfg.Proxy.Routes))
+			for i, route := range cfg.Proxy.Routes {
+				if route.Host != "" {
+					log.Printf("    %d. host=%s → %s", i+1, route.Host, route.Origin)
+				} else if route.Path != "" {
+					log.Printf("    %d. path=%s → %s", i+1, route.Path, route.Origin)
+				}
+			}
+		}
+		log.Printf("  - Challenge path: %s (serving from %s)", cfg.Proxy.ChallengePath, challengePageDir)
+		log.Printf("  - Timeouts: proxy=%dms, idle=%dms", cfg.Proxy.TimeoutMs, cfg.Proxy.IdleTimeoutMs)
+
 		// Create mux for API endpoints and proxy
 		mux := http.NewServeMux()
 
