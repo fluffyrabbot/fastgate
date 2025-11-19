@@ -225,6 +225,10 @@ func main() {
 		// Create mux for API endpoints and proxy
 		mux := http.NewServeMux()
 
+		// Serve challenge page assets directly, bypassing authz
+		challengeFS := http.FileServer(http.Dir(challengePageDir))
+		mux.Handle(cfg.Proxy.ChallengePath+"/", http.StripPrefix(cfg.Proxy.ChallengePath, challengeFS))
+
 		// Challenge endpoints (for PoW and WebAuthn challenges)
 		mux.Handle("/v1/challenge/nonce", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handleChallengeNonce(w, r, cfg, chIssuer, chNonceRPS)
@@ -235,8 +239,8 @@ func main() {
 
 		// WebAuthn endpoints (if enabled)
 		if webauthnHandler != nil {
-			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
-			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
+			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginLogin))
+			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishLogin))
 		}
 
 		// TAXII endpoints (if threat intel enabled)
@@ -296,13 +300,12 @@ func main() {
 			handleChallengeComplete(w, r, cfg, chIssuer, kr)
 		}))
 
-		// WebAuthn endpoints (if enabled)
-		if webauthnHandler != nil {
-			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
-			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
-			log.Info().Msg("WebAuthn endpoints registered")
-		}
-
+			// WebAuthn endpoints (if enabled)
+			if webauthnHandler != nil {
+				mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginLogin))
+				mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishLogin))
+				log.Info().Msg("WebAuthn endpoints registered")
+			}
 		// TAXII endpoints (if threat intel enabled)
 		if taxiiServer != nil {
 			mux.Handle("/taxii2/collections/", http.HandlerFunc(taxiiServer.HandleCollections))
@@ -710,7 +713,7 @@ func withCommonHeaders(next http.Handler) http.Handler {
 
 		// CSP for API endpoints (not proxied content)
 		if strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/taxii2/") || strings.HasPrefix(r.URL.Path, "/metrics") {
-			w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; frame-ancestors 'none'")
 		}
 
 		next.ServeHTTP(w, r)

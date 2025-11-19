@@ -11,41 +11,53 @@ cookie:
   secure: false
   http_only: true
 
+modes:
+  enforce: true
+  fail_open: false
+  under_attack: false
+
 proxy:
   enabled: true
   mode: "integrated"
   origin: "http://localhost:3000"
   
-  # Challenge setup
   challenge_path: "/__uam"
-  
-  # WebAuthn configuration (using localhost/test settings)
-  webauthn:
-    enabled: true
-    rp_id: "localhost"
-    rp_name: "MeSH System Access"
-    # IMPORTANT: Must include port in origin for WebAuthn to work on localhost
-    rp_origins: 
-      - "http://localhost:8080"
-    ttl_sec: 60
+  timeout_ms: 30000
+  idle_timeout_ms: 90000
 
-# Use a dummy secret for testing
+challenge:
+  difficulty_bits: 12
+  ttl_sec: 60
+  max_retries: 3
+  nonce_rps_limit: 5.0
+  retry_after_sec: 2
+
+webauthn:
+  enabled: true
+  rp_id: "localhost"
+  rp_name: "MeSH System Access"
+  rp_origins: 
+    - "http://localhost:8080"
+  ttl_sec: 60
+
 token:
   alg: "HS256"
   keys:
-    v1: "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg" # base64("thisisatestkeydonotuseinproduction")
+    v1: "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg"
   current_kid: "v1"
   issuer: "fastgate"
 
 policy:
-  # Force challenge on almost everything for testing
   challenge_threshold: 0  
   block_threshold: 100
+  paths: []
+  ws_concurrency_limits:
+    per_ip: 10
+    per_token: 10
 
-# Dummy cluster secret for stateless issuer
 cluster:
   enabled: true
-  secret_key: "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg" # base64("thisisatestkeydonotuseinproduction")
+  secret_key: "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg"
 
 logging:
   level: "debug"

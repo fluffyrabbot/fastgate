@@ -72,28 +72,24 @@ func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDi
 
 // ServeHTTP handles incoming requests with integrated authorization and proxying
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 1. Handle challenge page requests
-	if h.isChallengePage(r.URL.Path) {
-		h.serveChallengePage(w, r)
-		return
-	}
+	log.Debug().Str("path", r.URL.Path).Str("method", r.Method).Msg("Proxy handler received request")
 
-	// 2. Match route to get origin
+	// Match route to get origin
 	origin := h.matchRoute(r)
 	if origin == "" {
 		http.Error(w, "no route matched", http.StatusNotFound)
 		return
 	}
 
-	// 3. Run authorization check inline
+	// Run authorization check inline
 	decision, statusCode, cookies := h.checkAuthorization(r)
 
-	// 4. Propagate any cookies from authz (clearance cookies)
+	// Propagate any cookies from authz (clearance cookies)
 	for _, cookie := range cookies {
 		http.SetCookie(w, cookie)
 	}
 
-	// 5. Handle decision
+	// Handle decision
 	switch decision {
 	case "block":
 		metrics.AuthzDecision.WithLabelValues("block").Inc()
@@ -448,39 +444,12 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// serveChallengePage serves the challenge page and its assets
+// serveChallengePage serves the challenge page and its assets using a robust file server.
 func (h *Handler) serveChallengePage(w http.ResponseWriter, r *http.Request) {
-	// Strip challenge path prefix and clean the path
-	path := strings.TrimPrefix(r.URL.Path, h.cfg.Proxy.ChallengePath)
-	path = strings.TrimPrefix(path, "/")
-
-	// URL-decode to catch encoded traversal attempts
-	decodedPath, err := url.QueryUnescape(path)
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	// Prevent directory traversal attacks (check both original and decoded)
-	if strings.Contains(decodedPath, "..") || strings.Contains(path, "..") {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	path = decodedPath
-
-	if path == "" {
-		path = "index.html"
-	}
-
-	// Build full path and validate it's within challenge page directory
-	fullPath := path
-	if !strings.HasPrefix(fullPath, "/") {
-		fullPath = "/" + fullPath
-	}
-
-	// Serve file directly (safer than http.FileServer for this use case)
-	http.ServeFile(w, r, h.challengePageDir+fullPath)
+	log.Debug().Str("path", r.URL.Path).Str("dir", h.challengePageDir).Msg("Serving challenge page asset")
+	fs := http.FileServer(http.Dir(h.challengePageDir))
+	stripper := http.StripPrefix(h.cfg.Proxy.ChallengePath, fs)
+	stripper.ServeHTTP(w, r)
 }
 
 // Helper functions

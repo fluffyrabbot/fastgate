@@ -88,6 +88,7 @@ import { buildEntropyProfile } from './entropy/calculator.js';
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
+      redirect: 'manual',
       body: JSON.stringify(body)
     });
   }
@@ -106,7 +107,8 @@ import { buildEntropyProfile } from './entropy/calculator.js';
     try {
       let retURL = initialReturnUrl;
 
-      // Try WebAuthn first (if supported and available)
+      /*
+// Try WebAuthn first (if supported and available)
       if (window.WebAuthnSolver && window.WebAuthnSolver.supportsWebAuthn()) {
         try {
           const hasPlatform = await window.WebAuthnSolver.hasPlatformAuthenticator();
@@ -116,11 +118,13 @@ import { buildEntropyProfile } from './entropy/calculator.js';
             // If we get here, it succeeded and redirected
             return;
           }
-        } catch (webauthnError) {
+        }
+ catch (webauthnError) {
           console.log("WebAuthn failed, falling back to PoW:", webauthnError);
           // Fall through to PoW
         }
       }
+      */
 
       // Fallback to PoW challenge
       for (;;) {
