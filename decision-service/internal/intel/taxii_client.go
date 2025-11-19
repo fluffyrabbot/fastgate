@@ -80,8 +80,6 @@ func (c *TAXIIClient) FetchIndicators(ctx context.Context, collectionID string, 
 	return io.ReadAll(limitedReader)
 }
 
-// ListCollections lists available TAXII collections
-
 // Collection represents a TAXII collection
 type Collection struct {
 	ID          string `json:"id"`

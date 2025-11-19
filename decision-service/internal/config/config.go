@@ -13,6 +13,9 @@ import (
 
 type ServerCfg struct {
 	Listen         string `yaml:"listen"`
+	TLSEnabled     bool   `yaml:"tls_enabled"`
+	TLSCertFile    string `yaml:"tls_cert_file"`
+	TLSKeyFile     string `yaml:"tls_key_file"`
 	ReadTimeoutMs  int    `yaml:"read_timeout_ms"`
 	WriteTimeoutMs int    `yaml:"write_timeout_ms"`
 }
@@ -59,38 +62,17 @@ type PolicyCfg struct {
 	} `yaml:"ws_concurrency_limits"`
 }
 
-type RateStoreCfg struct {
-	Backend  string `yaml:"backend"`  // memory | redis (future)
-	RedisDSN string `yaml:"redis_dsn"`
-}
-
 type ChallengeCfg struct {
-	DifficultyBits int `yaml:"difficulty_bits"`
-	TTLSec         int `yaml:"ttl_sec"`
-	MaxRetries     int `yaml:"max_retries"`
+	DifficultyBits int     `yaml:"difficulty_bits"`
+	TTLSec         int     `yaml:"ttl_sec"`
+	MaxRetries     int     `yaml:"max_retries"`
+	StoreCapacity  int     `yaml:"store_capacity"`    // Challenge store LRU capacity (default: 100000)
+	NonceRPSLimit  float64 `yaml:"nonce_rps_limit"`   // Per-IP RPS limit for /challenge/nonce (default: 3.0)
+	RetryAfterSec  int     `yaml:"retry_after_sec"`   // Retry-After header value when rate limited (default: 2)
 }
 
 type LoggingCfg struct {
 	Level string `yaml:"level"` // info|debug
-}
-
-type AttestationCfg struct {
-	Enabled  bool   `yaml:"enabled"`
-	Provider string `yaml:"provider"`   // "privpass" (Privacy Pass / PAT-style)
-	Header   string `yaml:"header"`     // e.g., "Private-Token" or "Authorization"
-	Cookie   string `yaml:"cookie"`     // optional fallback cookie
-	Audience string `yaml:"audience"`   // optional hint to redemption
-	Issuer   string `yaml:"issuer"`     // optional hint to redemption
-	Tier     string `yaml:"tier"`       // resulting clearance tier (default "attested")
-	MaxTTLSec int   `yaml:"max_ttl_sec"` // clamp clearance TTL
-	Cache struct {
-		Capacity int `yaml:"capacity"`
-		TTLSec   int `yaml:"ttl_sec"`
-	} `yaml:"cache"`
-	Redemption struct {
-		Endpoint  string `yaml:"endpoint"`   // https://issuer.example/redeem
-		TimeoutMs int    `yaml:"timeout_ms"` // default 400ms
-	} `yaml:"redemption"`
 }
 
 type WebAuthnCfg struct {
@@ -121,6 +103,27 @@ type ThreatIntelCfg struct {
 	} `yaml:"auto_publish"`
 }
 
+type ProxyRoute struct {
+	Host    string `yaml:"host"`    // Host-based routing (e.g., "game.example.com")
+	Path    string `yaml:"path"`    // Path-based routing pattern (e.g., "^/api/")
+	Origin  string `yaml:"origin"`  // Upstream origin URL
+	PathRe  *regexp.Regexp
+}
+
+type ProxyCfg struct {
+	Enabled              bool         `yaml:"enabled"`                 // Enable integrated proxy mode
+	Mode                 string       `yaml:"mode"`                    // "integrated" | "nginx" (default: integrated)
+	Origin               string       `yaml:"origin"`                  // Simple single-origin mode
+	Routes               []ProxyRoute `yaml:"routes"`                  // Multi-origin routing rules
+	ChallengePath        string       `yaml:"challenge_path"`          // Challenge page path (default: /__uam)
+	TimeoutMs            int          `yaml:"timeout_ms"`              // Proxy timeout (default: 30000)
+	IdleTimeoutMs        int          `yaml:"idle_timeout_ms"`         // Idle timeout (default: 90000)
+	MaxIdleConns         int          `yaml:"max_idle_conns"`          // Max idle connections across all hosts (default: 100)
+	MaxIdleConnsPerHost  int          `yaml:"max_idle_conns_per_host"` // Max idle connections per host (default: 20)
+	MaxConnsPerHost      int          `yaml:"max_conns_per_host"`      // Max connections per host (default: 100)
+	MaxBodySizeMB        int          `yaml:"max_body_size_mb"`        // Max request body size in MB (default: 100)
+}
+
 type Config struct {
 	Version     string           `yaml:"version"`      // Config schema version (e.g., "v1")
 	Server      ServerCfg        `yaml:"server"`
@@ -128,12 +131,11 @@ type Config struct {
 	Cookie      CookieCfg        `yaml:"cookie"`
 	Token       TokenCfg         `yaml:"token"`
 	Policy      PolicyCfg        `yaml:"policy"`
-	RateStore   RateStoreCfg     `yaml:"rate_store"`
 	Challenge   ChallengeCfg     `yaml:"challenge"`
 	Logging     LoggingCfg       `yaml:"logging"`
-	Attestation AttestationCfg   `yaml:"attestation"`
 	WebAuthn    WebAuthnCfg      `yaml:"webauthn"`
 	ThreatIntel ThreatIntelCfg   `yaml:"threat_intel"`
+	Proxy       ProxyCfg         `yaml:"proxy"`
 }
 
 func Load(path string) (*Config, error) {
@@ -186,31 +188,57 @@ func Load(path string) (*Config, error) {
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
 	}
-	// Attestation defaults
-	if cfg.Attestation.Header == "" {
-		cfg.Attestation.Header = "Private-Token"
-	}
-	if cfg.Attestation.Tier == "" {
-		cfg.Attestation.Tier = "attested"
-	}
-	if cfg.Attestation.MaxTTLSec == 0 {
-		cfg.Attestation.MaxTTLSec = 24 * 3600
-	}
-	if cfg.Attestation.Cache.Capacity == 0 {
-		cfg.Attestation.Cache.Capacity = 100_000
-	}
-	if cfg.Attestation.Cache.TTLSec == 0 {
-		cfg.Attestation.Cache.TTLSec = 3600
-	}
-	if cfg.Attestation.Redemption.TimeoutMs == 0 {
-		cfg.Attestation.Redemption.TimeoutMs = 400
-	}
 	// WebAuthn defaults
 	if cfg.WebAuthn.RPName == "" {
 		cfg.WebAuthn.RPName = "FastGate"
 	}
 	if cfg.WebAuthn.TTLSec == 0 {
 		cfg.WebAuthn.TTLSec = 60
+	}
+	// Challenge defaults
+	if cfg.Challenge.StoreCapacity == 0 {
+		cfg.Challenge.StoreCapacity = 100000 // 100k challenges
+	}
+	if cfg.Challenge.NonceRPSLimit == 0 {
+		cfg.Challenge.NonceRPSLimit = 3.0 // 3 req/sec per IP
+	}
+	if cfg.Challenge.RetryAfterSec == 0 {
+		cfg.Challenge.RetryAfterSec = 2 // 2 seconds
+	}
+	// Proxy defaults
+	if cfg.Proxy.Mode == "" {
+		cfg.Proxy.Mode = "integrated"
+	}
+	if cfg.Proxy.ChallengePath == "" {
+		cfg.Proxy.ChallengePath = "/__uam"
+	}
+	if cfg.Proxy.TimeoutMs == 0 {
+		cfg.Proxy.TimeoutMs = 30000
+	}
+	if cfg.Proxy.IdleTimeoutMs == 0 {
+		cfg.Proxy.IdleTimeoutMs = 90000
+	}
+	if cfg.Proxy.MaxIdleConns == 0 {
+		cfg.Proxy.MaxIdleConns = 100
+	}
+	if cfg.Proxy.MaxIdleConnsPerHost == 0 {
+		cfg.Proxy.MaxIdleConnsPerHost = 20
+	}
+	if cfg.Proxy.MaxConnsPerHost == 0 {
+		cfg.Proxy.MaxConnsPerHost = 100
+	}
+	if cfg.Proxy.MaxBodySizeMB == 0 {
+		cfg.Proxy.MaxBodySizeMB = 100 // 100MB
+	}
+	// Compile route path patterns
+	for i := range cfg.Proxy.Routes {
+		if cfg.Proxy.Routes[i].Path != "" {
+			re, err := regexp.Compile(cfg.Proxy.Routes[i].Path)
+			if err != nil {
+				return nil, fmt.Errorf("invalid proxy route path pattern %q: %w", cfg.Proxy.Routes[i].Path, err)
+			}
+			cfg.Proxy.Routes[i].PathRe = re
+		}
 	}
 	return &cfg, nil
 }
@@ -226,6 +254,21 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.WriteTimeoutMs <= 0 || c.Server.WriteTimeoutMs > 300000 {
 		return fmt.Errorf("server.write_timeout_ms must be in (0, 300000], got %d", c.Server.WriteTimeoutMs)
+	}
+
+	// TLS validation
+	if c.Server.TLSEnabled {
+		if c.Server.TLSCertFile == "" {
+			return errors.New("server.tls_cert_file required when tls_enabled=true")
+		}
+		if c.Server.TLSKeyFile == "" {
+			return errors.New("server.tls_key_file required when tls_enabled=true")
+		}
+	}
+
+	// Warn if cookies require HTTPS but TLS not enabled
+	if c.Cookie.Secure && !c.Server.TLSEnabled {
+		fmt.Println("WARNING: cookie.secure=true but TLS not enabled - cookies won't be sent")
 	}
 
 	// Policy thresholds
@@ -274,25 +317,6 @@ func (c *Config) Validate() error {
 		return errors.New("token.current_kid not found in token.keys")
 	}
 
-	// Attestation validation
-	if c.Attestation.Enabled {
-		if c.Attestation.Provider != "privpass" {
-			return errors.New("attestation.provider must be 'privpass' (for Privacy Pass/PAT-style)")
-		}
-		if c.Attestation.Redemption.Endpoint == "" {
-			return errors.New("attestation.redemption.endpoint required when attestation.enabled")
-		}
-		if c.Attestation.Header == "" && c.Attestation.Cookie == "" {
-			return errors.New("attestation.header or attestation.cookie required")
-		}
-		if c.Attestation.Cache.Capacity < 1000 || c.Attestation.Cache.Capacity > 1000000 {
-			return errors.New("attestation.cache.capacity must be in [1000, 1000000]")
-		}
-		if c.Attestation.Cache.TTLSec <= 0 || c.Attestation.Cache.TTLSec > 86400 {
-			return errors.New("attestation.cache.ttl_sec must be in (0, 86400]")
-		}
-	}
-
 	// WebAuthn validation
 	if c.WebAuthn.Enabled {
 		if c.WebAuthn.RPID == "" {
@@ -339,6 +363,71 @@ func (c *Config) Validate() error {
 			}
 			if c.ThreatIntel.AutoPublish.TTLHours <= 0 || c.ThreatIntel.AutoPublish.TTLHours > 720 {
 				return errors.New("threat_intel.auto_publish.ttl_hours must be in (0, 720]")
+			}
+		}
+	}
+
+	// Proxy validation
+	if c.Proxy.Enabled {
+		if c.Proxy.Mode != "integrated" && c.Proxy.Mode != "nginx" {
+			return fmt.Errorf("proxy.mode must be 'integrated' or 'nginx', got %q", c.Proxy.Mode)
+		}
+		if c.Proxy.TimeoutMs <= 0 || c.Proxy.TimeoutMs > 300000 {
+			return errors.New("proxy.timeout_ms must be in (0, 300000]")
+		}
+		if c.Proxy.IdleTimeoutMs <= 0 || c.Proxy.IdleTimeoutMs > 600000 {
+			return errors.New("proxy.idle_timeout_ms must be in (0, 600000]")
+		}
+		// Validate challenge path
+		if c.Proxy.ChallengePath != "" {
+			if !strings.HasPrefix(c.Proxy.ChallengePath, "/") {
+				return errors.New("proxy.challenge_path must start with /")
+			}
+			if strings.Contains(c.Proxy.ChallengePath, "..") {
+				return errors.New("proxy.challenge_path must not contain ..")
+			}
+			if strings.Contains(c.Proxy.ChallengePath, "//") {
+				return errors.New("proxy.challenge_path must not contain //")
+			}
+		}
+		// Validate that either origin or routes is specified
+		if c.Proxy.Origin == "" && len(c.Proxy.Routes) == 0 {
+			return errors.New("proxy.origin or proxy.routes required when proxy.enabled\n" +
+				"  Example single-origin:\n" +
+				"    proxy:\n" +
+				"      enabled: true\n" +
+				"      mode: integrated\n" +
+				"      origin: \"http://localhost:3000\"\n" +
+				"  Example multi-origin:\n" +
+				"    proxy:\n" +
+				"      enabled: true\n" +
+				"      mode: integrated\n" +
+				"      routes:\n" +
+				"        - host: \"app.example.com\"\n" +
+				"          origin: \"http://localhost:3000\"\n" +
+				"        - path: \"^/api/\"\n" +
+				"          origin: \"http://localhost:4000\"")
+		}
+		// Validate origin URL format
+		if c.Proxy.Origin != "" {
+			if !strings.HasPrefix(c.Proxy.Origin, "http://") && !strings.HasPrefix(c.Proxy.Origin, "https://") {
+				return fmt.Errorf("proxy.origin must start with http:// or https://, got %q", c.Proxy.Origin)
+			}
+		}
+		// Validate route configurations
+		for i, route := range c.Proxy.Routes {
+			if route.Host == "" && route.Path == "" {
+				return fmt.Errorf("proxy.routes[%d]: either host or path required\n"+
+					"  Example: host: \"app.example.com\" or path: \"^/api/\"", i)
+			}
+			if route.Origin == "" {
+				return fmt.Errorf("proxy.routes[%d].origin required\n"+
+					"  Example: origin: \"http://localhost:3000\"", i)
+			}
+			if !strings.HasPrefix(route.Origin, "http://") && !strings.HasPrefix(route.Origin, "https://") {
+				return fmt.Errorf("proxy.routes[%d].origin must start with http:// or https://\n"+
+					"  Got: %q\n"+
+					"  Example: origin: \"http://localhost:3000\"", i, route.Origin)
 			}
 		}
 	}

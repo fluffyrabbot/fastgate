@@ -8,6 +8,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"fastgate/decision-service/internal/metrics"
 )
 
 // Item is an in-memory record for an issued challenge.
@@ -97,6 +99,7 @@ func (s *Store) NewWithMaxRetries(bits, maxRetries int) (string, string, error) 
 	}
 	el := s.lru.PushFront(en)
 	s.data[id] = el
+	metrics.ChallengeStoreSize.Set(float64(len(s.data)))
 
 	return id, base64.RawURLEncoding.EncodeToString(nonce), nil
 }
@@ -117,6 +120,7 @@ func (s *Store) Get(id string) (*Item, error) {
 	if time.Now().After(en.it.ExpiresAt) {
 		delete(s.data, id)
 		s.lru.Remove(el)
+		metrics.ChallengeStoreSize.Set(float64(len(s.data)))
 		return nil, errors.New("expired")
 	}
 	// Touch LRU.
@@ -133,6 +137,7 @@ func (s *Store) Consume(id string) {
 	if el, ok := s.data[id]; ok {
 		delete(s.data, id)
 		s.lru.Remove(el)
+		metrics.ChallengeStoreSize.Set(float64(len(s.data)))
 	}
 }
 
@@ -167,6 +172,7 @@ func (s *Store) TrySolve(id, nonceB64 string, solution uint32) (bool, string, er
 	if now.After(en.it.ExpiresAt) {
 		delete(s.data, id)
 		s.lru.Remove(el)
+		metrics.ChallengeStoreSize.Set(float64(len(s.data)))
 		return false, "expired", nil
 	}
 
@@ -181,6 +187,7 @@ func (s *Store) TrySolve(id, nonceB64 string, solution uint32) (bool, string, er
 		// Success: consume.
 		delete(s.data, id)
 		s.lru.Remove(el)
+		metrics.ChallengeStoreSize.Set(float64(len(s.data)))
 		return true, "ok", nil
 	}
 
@@ -189,6 +196,7 @@ func (s *Store) TrySolve(id, nonceB64 string, solution uint32) (bool, string, er
 	if en.it.Retries > en.it.MaxRetries {
 		delete(s.data, id)
 		s.lru.Remove(el)
+		metrics.ChallengeStoreSize.Set(float64(len(s.data)))
 		return false, "too_many_retries", nil
 	}
 
