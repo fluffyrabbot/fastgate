@@ -2,6 +2,7 @@ package rate
 
 import (
 	"container/list"
+	"log"
 	"sync"
 	"time"
 )
@@ -62,6 +63,15 @@ func (s *SlidingRPS) Add(key string) float64 {
 	now := s.nowFunc()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// SECURITY: Monitor capacity to detect DoS attacks via key explosion
+	currentSize := s.lru.Len()
+	if currentSize > s.cap*90/100 {
+		// Alert when approaching 90% capacity (only log occasionally to avoid spam)
+		if currentSize%100 == 0 {
+			log.Printf("SECURITY WARNING: rate limiter approaching capacity (%d/%d entries)", currentSize, s.cap)
+		}
+	}
 
 	// Fast path: update existing entry
 	if el, ok := s.items[key]; ok {

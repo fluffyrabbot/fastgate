@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"crypto/rand"
 	"encoding/base64"
+	"log"
 	"sync"
 	"time"
 
@@ -28,8 +29,14 @@ type entry struct {
 }
 
 // NewStore creates a new Store with the specified TTL and default capacity (10,000).
+// SECURITY: Starts background cleanup goroutine to prevent memory exhaustion.
 func NewStore(ttl time.Duration) *Store {
-	return NewStoreWithCapacity(ttl, 10000)
+	s := NewStoreWithCapacity(ttl, 10000)
+
+	// Start background cleanup goroutine
+	go s.backgroundCleanup()
+
+	return s
 }
 
 // NewStoreWithCapacity creates a new Store with custom capacity.
@@ -121,3 +128,43 @@ func (s *Store) Consume(id string) {
 	}
 }
 
+// backgroundCleanup periodically removes expired entries to prevent memory exhaustion.
+// SECURITY: Prevents DoS attacks where attackers fill store with uncompleted challenges.
+func (s *Store) backgroundCleanup() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.cleanupExpired()
+	}
+}
+
+// cleanupExpired removes all expired entries from the store.
+func (s *Store) cleanupExpired() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	var toRemove []string
+
+	// Collect expired entries
+	for id, el := range s.data {
+		en := el.Value.(*entry)
+		if now.After(en.expiresAt) {
+			toRemove = append(toRemove, id)
+		}
+	}
+
+	// Remove expired entries
+	for _, id := range toRemove {
+		if el, ok := s.data[id]; ok {
+			delete(s.data, id)
+			s.lru.Remove(el)
+		}
+	}
+
+	// Log cleanup if significant
+	if len(toRemove) > 10 {
+		log.Printf("webauthn store: cleaned up %d expired entries", len(toRemove))
+	}
+}

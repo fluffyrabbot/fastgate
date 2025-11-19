@@ -297,7 +297,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// SECURITY: Cookie security misconfiguration check
 	if c.Cookie.Secure && !c.Server.TLSEnabled {
+		if c.Modes.Enforce {
+			// In enforce mode, this is a critical misconfiguration
+			return errors.New("cookie.secure=true requires server.tls_enabled=true in enforce mode (production)")
+		}
+		// Still warn in observe/dev mode
 		fmt.Println("WARNING: cookie.secure=true but TLS not enabled - cookies won't be sent")
 	}
 

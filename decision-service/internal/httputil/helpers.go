@@ -103,21 +103,43 @@ func RequestIDMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler 
 
 // SanitizeReturnURL prevents open redirect attacks by restricting to same-origin paths.
 // Accepts: "/", "/path", "/path?query", but NOT "//host", "http://", "https://".
+// SanitizeReturnURL validates and sanitizes redirect URLs to prevent open redirect attacks.
+// SECURITY: Enhanced to prevent encoding-based bypasses and protocol-relative URLs.
 func SanitizeReturnURL(in string) string {
 	if in == "" {
 		return "/"
 	}
-	// Quick rejects
-	if strings.HasPrefix(in, "//") || strings.HasPrefix(in, "http://") || strings.HasPrefix(in, "https://") {
+
+	// SECURITY: Decode URL to prevent bypass via encoding (e.g., %2F%2Fevil.com)
+	decoded, err := url.QueryUnescape(in)
+	if err != nil {
+		// If URL unescape fails, it's likely malformed - reject it
 		return "/"
 	}
+
+	// Check decoded version for attack patterns
+	if strings.Contains(decoded, "://") ||
+		strings.HasPrefix(decoded, "//") ||
+		strings.HasPrefix(decoded, "http://") ||
+		strings.HasPrefix(decoded, "https://") {
+		return "/"
+	}
+
+	// Parse original (not decoded) to verify well-formed
 	u, err := url.ParseRequestURI(in)
 	if err != nil {
 		return "/"
 	}
+
+	// SECURITY: Must be a path-only URL (no host or scheme)
+	if u.Host != "" || u.Scheme != "" {
+		return "/"
+	}
+
 	if !strings.HasPrefix(u.Path, "/") {
 		return "/"
 	}
+
 	// Keep path + raw query; drop fragments (browsers keep them client-side anyway)
 	out := u.Path
 	if u.RawQuery != "" {

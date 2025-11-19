@@ -114,7 +114,16 @@ func (k *Keyring) Verify(tok string, minLeft time.Duration) (*ClearanceClaims, b
 	if tok == "" {
 		return nil, false, ErrEmptyToken
 	}
-	parser := jwt.NewParser(jwt.WithValidMethods([]string{k.Alg}))
+	// SECURITY: Explicitly reject "none" algorithm and enforce strict validation
+	parser := jwt.NewParser(
+		jwt.WithValidMethods([]string{k.Alg}),
+		jwt.WithStrictDecoding(), // Reject malformed tokens
+	)
+
+	// Additional safety check: ensure algorithm is not "none"
+	if k.Alg == "none" || k.Alg == "" {
+		return nil, false, errors.New("algorithm 'none' is not allowed for security reasons")
+	}
 	var claims ClearanceClaims
 
 	// Signature & alg enforcement via parser; select key by kid.
