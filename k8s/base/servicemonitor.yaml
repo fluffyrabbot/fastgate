@@ -1,0 +1,120 @@
+# Prometheus ServiceMonitor for metrics collection
+# Requires prometheus-operator to be installed
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fastgate
+  labels:
+    app: fastgate
+    component: gateway
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: fastgate
+      component: gateway
+
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+
+      # Relabeling to add useful labels
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+
+      # Metric relabeling (drop high-cardinality metrics if needed)
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'go_gc_.*'
+          action: drop  # Drop verbose GC metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fastgate-alerts
+  labels:
+    app: fastgate
+    component: gateway
+    prometheus: kube-prometheus
+spec:
+  groups:
+    - name: fastgate
+      interval: 30s
+      rules:
+        # High rate limit hit rate
+        - alert: FastGateHighRateLimitHits
+          expr: rate(fastgate_rate_limit_hits_total[5m]) > 100
+          for: 5m
+          labels:
+            severity: warning
+            component: fastgate
+          annotations:
+            summary: "High rate limit hit rate on {{ $labels.pod }}"
+            description: "FastGate is experiencing {{ $value }} rate limit hits per second, indicating potential attack or misconfiguration."
+
+        # High block rate
+        - alert: FastGateHighBlockRate
+          expr: rate(fastgate_authz_decision_total{action="block"}[5m]) > 50
+          for: 5m
+          labels:
+            severity: warning
+            component: fastgate
+          annotations:
+            summary: "High block rate on {{ $labels.pod }}"
+            description: "FastGate is blocking {{ $value }} requests per second. Possible attack in progress."
+
+        # Low challenge solve rate (bot detection)
+        - alert: FastGateLowChallengeSolveRate
+          expr: |
+            (
+              rate(fastgate_challenge_solved_total[10m]) /
+              rate(fastgate_challenge_started_total[10m])
+            ) < 0.3
+          for: 10m
+          labels:
+            severity: info
+            component: fastgate
+          annotations:
+            summary: "Low challenge solve rate on {{ $labels.pod }}"
+            description: "Only {{ $value | humanizePercentage }} of challenges are being solved. High bot traffic or difficulty too high."
+
+        # High proxy error rate
+        - alert: FastGateHighProxyErrors
+          expr: rate(fastgate_proxy_errors_total[5m]) > 10
+          for: 5m
+          labels:
+            severity: critical
+            component: fastgate
+          annotations:
+            summary: "High proxy error rate on {{ $labels.pod }}"
+            description: "FastGate proxy is experiencing {{ $value }} errors per second. Backend may be down."
+
+        # WebAuthn registration failures
+        - alert: FastGateWebAuthnFailures
+          expr: rate(fastgate_webauthn_attestation_total{result="failed"}[5m]) > 5
+          for: 5m
+          labels:
+            severity: warning
+            component: fastgate
+          annotations:
+            summary: "High WebAuthn failure rate on {{ $labels.pod }}"
+            description: "WebAuthn is failing at {{ $value }} requests per second. Check configuration or attestation validation."
+
+        # Pod restart rate
+        - alert: FastGatePodRestartRate
+          expr: rate(kube_pod_container_status_restarts_total{pod=~"fastgate-.*"}[15m]) > 0.1
+          for: 15m
+          labels:
+            severity: warning
+            component: fastgate
+          annotations:
+            summary: "FastGate pod {{ $labels.pod }} restarting frequently"
+            description: "Pod has restarted {{ $value }} times in the last 15 minutes."

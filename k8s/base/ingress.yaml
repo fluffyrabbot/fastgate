@@ -1,0 +1,68 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fastgate
+  labels:
+    app: fastgate
+    component: gateway
+  annotations:
+    # NGINX Ingress Controller
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+
+    # Rate limiting (optional, FastGate handles this internally)
+    # nginx.ingress.kubernetes.io/limit-rps: "1000"
+
+    # WebSocket support
+    nginx.ingress.kubernetes.io/websocket-services: "fastgate"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+
+    # Certificate management (cert-manager)
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+    # AWS ALB annotations (if using AWS ALB Ingress Controller)
+    # alb.ingress.kubernetes.io/scheme: internet-facing
+    # alb.ingress.kubernetes.io/target-type: ip
+    # alb.ingress.kubernetes.io/backend-protocol: HTTPS
+    # alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    # alb.ingress.kubernetes.io/success-codes: "200"
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
+
+spec:
+  ingressClassName: nginx
+
+  # TLS configuration
+  tls:
+    - hosts:
+        - example.com
+        - www.example.com
+      secretName: fastgate-tls-cert
+
+  rules:
+    - host: example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastgate
+                port:
+                  number: 80
+
+    - host: www.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastgate
+                port:
+                  number: 80

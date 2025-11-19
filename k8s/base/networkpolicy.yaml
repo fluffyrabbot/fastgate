@@ -1,0 +1,79 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fastgate
+  labels:
+    app: fastgate
+    component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: fastgate
+      component: gateway
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress rules
+  ingress:
+    # Allow traffic from load balancer
+    - from:
+        - namespaceSelector: {}
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Allow Prometheus scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 8080
+
+  # Egress rules
+  egress:
+    # Allow DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+        - podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+
+    # Allow connection to backend services
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend  # Your backend service
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Allow HTTPS for threat intel (if enabled)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # Allow cluster gossip (if cluster mode enabled)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: fastgate
+      ports:
+        - protocol: TCP
+          port: 7946
+        - protocol: UDP
+          port: 7946

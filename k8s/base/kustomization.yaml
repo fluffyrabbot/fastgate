@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/name: fastgate
+  app.kubernetes.io/component: gateway
+  app.kubernetes.io/managed-by: kustomize
+
+# Common annotations
+commonAnnotations:
+  fastgate.io/version: "1.0.0"
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - configmap.yaml
+  - secret.yaml
+  - serviceaccount.yaml
+  - hpa.yaml
+  - servicemonitor.yaml
+  - networkpolicy.yaml
+  - poddisruptionbudget.yaml
+
+# Images (update with your registry)
+images:
+  - name: fastgate
+    newName: your-registry/fastgate
+    newTag: latest
+
+# ConfigMap generator (alternative to static configmap.yaml)
+# configMapGenerator:
+#   - name: fastgate-config
+#     files:
+#       - config.yaml=../../config.production.yaml
+
+# Secret generator (DO NOT commit actual secrets)
+# secretGenerator:
+#   - name: fastgate-secrets
+#     literals:
+#       - token-secret=REPLACE_ME
+#       - cluster-secret=REPLACE_ME

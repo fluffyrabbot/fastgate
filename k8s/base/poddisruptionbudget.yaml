@@ -1,0 +1,18 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fastgate
+  labels:
+    app: fastgate
+    component: gateway
+spec:
+  minAvailable: 2  # Always keep at least 2 pods running
+  selector:
+    matchLabels:
+      app: fastgate
+      component: gateway
+
+  # Ensures high availability during:
+  # - Node drains
+  # - Cluster upgrades
+  # - Voluntary disruptions

@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastgate-config
+  labels:
+    app: fastgate
+    component: gateway
+data:
+  config.yaml: |
+    version: v1
+
+    server:
+      listen: ":8080"
+      read_timeout_ms: 5000
+      write_timeout_ms: 10000
+
+      # TLS configuration (certificates mounted from secret)
+      tls_enabled: true
+      tls_cert_file: "/etc/fastgate/tls/tls.crt"
+      tls_key_file: "/etc/fastgate/tls/tls.key"
+
+      # SECURITY: Trusted proxy CIDRs (AWS VPC example)
+      # Update these for your infrastructure
+      trusted_proxies:
+        - "10.0.0.0/8"      # AWS VPC private range
+        - "172.16.0.0/12"   # Private network
+
+    cookie:
+      name: "Clearance"
+      same_site: "Lax"
+      max_age_sec: 3600
+      secure: true  # Required for production
+      http_only: true
+      domain: ""  # Set to your domain if needed
+
+    modes:
+      enforce: true
+      fail_open: false
+      under_attack: false
+
+    proxy:
+      enabled: true
+      mode: "integrated"
+      origin: "http://backend:8080"  # Your backend service
+
+      challenge_path: "/__uam"
+      timeout_ms: 30000
+      idle_timeout_ms: 90000
+      max_body_size_mb: 100
+
+      # Connection pool settings for high throughput
+      max_idle_conns: 100
+      max_idle_conns_per_host: 20
+      max_conns_per_host: 100
+
+    challenge:
+      difficulty_bits: 16  # Production setting
+      ttl_sec: 60
+      max_retries: 3
+      nonce_rps_limit: 5.0
+      retry_after_sec: 2
+
+    webauthn:
+      enabled: true
+      rp_id: "example.com"  # MUST match your domain
+      rp_name: "Example Application"
+      rp_origins:
+        - "https://example.com"  # MUST use HTTPS
+      ttl_sec: 60
+
+    token:
+      alg: "HS256"
+      # Secrets loaded from environment variables or secret files
+      keys:
+        v1: ""  # Injected from secret
+      current_kid: "v1"
+      issuer: "fastgate"
+      skew_sec: 30
+
+    policy:
+      challenge_threshold: 30
+      block_threshold: 100
+      ip_rps_threshold: 100
+      token_rps_threshold: 50
+
+      paths:
+        - pattern: "^/api/admin"
+          base: 20
+        - pattern: "^/login"
+          base: 15
+
+      ws_concurrency_limits:
+        per_ip: 10
+        per_token: 10
+
+    cluster:
+      enabled: true
+      bind_addr: "0.0.0.0:7946"
+      secret_key: ""  # Injected from secret
+
+    threat_intel:
+      enabled: false
+      cache_capacity: 100000
+
+    logging:
+      level: "info"

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastgate
+  labels:
+    app: fastgate
+    component: gateway
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/healthz"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "10"
+spec:
+  type: LoadBalancer
+  sessionAffinity: None  # Stateless design, no session affinity needed
+  externalTrafficPolicy: Local  # Preserve source IP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: fastgate
+    component: gateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastgate-headless
+  labels:
+    app: fastgate
+    component: gateway
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless for direct pod access
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: fastgate
+    component: gateway
+  publishNotReadyAddresses: false

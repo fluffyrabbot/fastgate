@@ -1,0 +1,84 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: production
+
+bases:
+  - ../../base
+
+# Production-specific labels
+commonLabels:
+  environment: production
+  tier: frontend
+
+# Production-specific annotations
+commonAnnotations:
+  fastgate.io/environment: "production"
+
+# Production replica count
+replicas:
+  - name: fastgate
+    count: 5  # Higher for production
+
+# Production image
+images:
+  - name: fastgate
+    newName: your-registry/fastgate
+    newTag: v1.0.0  # Specific version, not latest
+
+# Production resource adjustments
+patches:
+  # Increase resources for production load
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 1000m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 1Gi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: 4000m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 4Gi
+    target:
+      kind: Deployment
+      name: fastgate
+
+  # Production HPA settings
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 5
+      - op: replace
+        path: /spec/maxReplicas
+        value: 50
+    target:
+      kind: HorizontalPodAutoscaler
+      name: fastgate
+
+  # Production PDB
+  - patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 3
+    target:
+      kind: PodDisruptionBudget
+      name: fastgate
+
+# Production-specific config overrides
+configMapGenerator:
+  - name: fastgate-config
+    behavior: replace
+    literals:
+      - logging.level=info
+      - modes.enforce=true
+      - modes.fail_open=false
+      - challenge.difficulty_bits=18  # Higher for production
+
+# Production secrets (managed by external secrets operator or sealed secrets)
+# secretGenerator:
+#   - name: fastgate-secrets
+#     behavior: replace
+#     env: secrets.env  # Loaded from CI/CD or secrets manager

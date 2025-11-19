@@ -1,0 +1,79 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: development
+
+bases:
+  - ../../base
+
+# Development-specific labels
+commonLabels:
+  environment: development
+  tier: testing
+
+# Development-specific annotations
+commonAnnotations:
+  fastgate.io/environment: "development"
+
+# Development replica count (lower)
+replicas:
+  - name: fastgate
+    count: 1
+
+# Development image
+images:
+  - name: fastgate
+    newName: your-registry/fastgate
+    newTag: dev-latest
+
+# Development resource adjustments (lower)
+patches:
+  # Reduce resources for development
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 256Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: 500m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 512Mi
+    target:
+      kind: Deployment
+      name: fastgate
+
+  # Development HPA settings (disabled or minimal)
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 3
+    target:
+      kind: HorizontalPodAutoscaler
+      name: fastgate
+
+  # Allow test keys in development
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: FASTGATE_ALLOW_TEST_KEYS
+          value: "true"
+    target:
+      kind: Deployment
+      name: fastgate
+
+# Development config overrides
+configMapGenerator:
+  - name: fastgate-config
+    behavior: merge
+    literals:
+      - logging.level=debug
+      - modes.enforce=false  # Observe mode for development
+      - challenge.difficulty_bits=12  # Lower for faster testing

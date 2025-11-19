@@ -1,0 +1,236 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastgate
+  labels:
+    app: fastgate
+    component: gateway
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Zero-downtime deployments
+  selector:
+    matchLabels:
+      app: fastgate
+      component: gateway
+  template:
+    metadata:
+      labels:
+        app: fastgate
+        component: gateway
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Security: Run as non-root user
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # High-priority pods for critical gateway workload
+      priorityClassName: system-cluster-critical
+
+      # Service account for RBAC
+      serviceAccountName: fastgate
+
+      # Topology spread for high availability
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: fastgate
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: fastgate
+
+      # Init container to validate configuration
+      initContainers:
+        - name: config-validator
+          image: fastgate:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Validating FastGate configuration..."
+              /app/fastgate --config /etc/fastgate/config.yaml --validate || exit 1
+              echo "Configuration valid"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fastgate
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/fastgate/secrets
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+      containers:
+        - name: fastgate
+          image: fastgate:latest
+          imagePullPolicy: IfNotPresent
+
+          # Security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          # Application port
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Environment variables from secrets
+          env:
+            - name: FASTGATE_CONFIG
+              value: /etc/fastgate/config.yaml
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+          # Volume mounts
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fastgate
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/fastgate/secrets
+              readOnly: true
+            - name: tls
+              mountPath: /etc/fastgate/tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/fastgate
+
+          # Resource limits and requests
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+
+          # Liveness probe - checks if process is alive
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+
+          # Readiness probe - checks if ready to serve traffic
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 2
+
+          # Startup probe - gives time for slow initialization
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 12  # 60 seconds max startup time
+
+          # Graceful shutdown
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 10  # Allow time for load balancer to deregister
+
+      # Graceful termination period
+      terminationGracePeriodSeconds: 30
+
+      # Volumes
+      volumes:
+        - name: config
+          configMap:
+            name: fastgate-config
+            defaultMode: 0644
+        - name: secrets
+          secret:
+            secretName: fastgate-secrets
+            defaultMode: 0400
+        - name: tls
+          secret:
+            secretName: fastgate-tls
+            defaultMode: 0400
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: cache
+          emptyDir:
+            sizeLimit: 500Mi
+
+      # DNS configuration
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+
+      # Pod anti-affinity for high availability
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - fastgate
+                topologyKey: kubernetes.io/hostname
