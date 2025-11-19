@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,6 +17,8 @@ import (
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Pool for hash.Hash64 to reduce allocations in WebSocket path
@@ -153,7 +154,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Debug logging
 		if h.Cfg.Logging.Level == "debug" {
-			log.Printf("authz decision=block ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+			log.Debug().
+				Str("decision", "block").
+				Str("client_ip", clientIP).
+				Int("score", score).
+				Interface("reasons", reasons).
+				Str("method", method).
+				Str("uri", uri).
+				Msg("authz decision")
 		}
 
 		// Auto-publish to threat intel
@@ -174,7 +182,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Debug logging
 		if h.Cfg.Logging.Level == "debug" {
-			log.Printf("authz decision=challenge ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+			log.Debug().
+				Str("decision", "challenge").
+				Str("client_ip", clientIP).
+				Int("score", score).
+				Interface("reasons", reasons).
+				Str("method", method).
+				Str("uri", uri).
+				Msg("authz decision")
 		}
 
 		setReasonHeaders(w, reasons, score)
@@ -207,7 +222,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Debug logging
 	if h.Cfg.Logging.Level == "debug" {
-		log.Printf("authz decision=allow ip=%s score=%d reasons=%v method=%s uri=%s", clientIP, score, reasons, method, uri)
+		log.Debug().
+			Str("decision", "allow").
+			Str("client_ip", clientIP).
+			Int("score", score).
+			Interface("reasons", reasons).
+			Str("method", method).
+			Str("uri", uri).
+			Msg("authz decision")
 	}
 
 	w.WriteHeader(http.StatusNoContent)

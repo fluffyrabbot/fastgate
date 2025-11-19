@@ -248,9 +248,14 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 	r.Header.Del("X-Forwarded-Proto")
 	r.Header.Del("X-Forwarded-Host")
 
+	// Add request-level timeout context (in addition to transport timeout)
+	timeoutDuration := time.Duration(h.cfg.Proxy.TimeoutMs) * time.Millisecond
+	ctx, cancel := context.WithTimeout(r.Context(), timeoutDuration)
+	defer cancel()
+
 	// Proxy the request with latency tracking
 	start := time.Now()
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(w, r.WithContext(ctx))
 	duration := time.Since(start)
 
 	// Record proxy latency metric

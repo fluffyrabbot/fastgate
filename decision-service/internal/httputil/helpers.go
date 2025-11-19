@@ -1,6 +1,7 @@
 package httputil
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"fastgate/decision-service/internal/config"
 	"github.com/rs/zerolog"
@@ -22,6 +24,13 @@ const (
 	requestIDKey contextKey = iota
 	loggerKey
 )
+
+// Buffer pool for JSON encoding hot path optimization
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
 
 // GenerateRequestID creates a new random request ID
 func GenerateRequestID() string {
@@ -138,14 +147,30 @@ func ClientIPFromHeaders(r *http.Request) string {
 }
 
 // WriteJSON writes a JSON response with proper headers and error handling.
+// Uses sync.Pool for buffers to reduce hot path allocations.
 func WriteJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
-	enc := json.NewEncoder(w)
+
+	// Get buffer from pool
+	buf := bufferPool.Get().(*bytes.Buffer)
+	defer func() {
+		buf.Reset()
+		bufferPool.Put(buf)
+	}()
+
+	// Create encoder and encode to buffer
+	enc := json.NewEncoder(buf)
 	enc.SetEscapeHTML(true)
+
+	// Encode to buffer first to handle errors gracefully
 	if err := enc.Encode(v); err != nil {
 		log.Printf("ERROR: JSON encode failed: %v", err)
+		return
 	}
+
+	// Write buffered output
+	w.Write(buf.Bytes())
 }
 
 // BuildCookie creates a cookie with the configured security settings.
