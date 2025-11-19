@@ -39,6 +39,12 @@ var (
 			Help: "Challenges solved",
 		},
 	)
+	ChallengeStoreSize = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "fastgate_challenge_store_size",
+			Help: "Current number of challenges in store",
+		},
+	)
 	WSUpgrades = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fastgate_ws_upgrades_total",
@@ -106,6 +112,12 @@ var (
 		},
 		[]string{"operation"}, // operation: hit, miss, eviction, expiration
 	)
+	ProxyCacheSize = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "fastgate_proxy_cache_size",
+			Help: "Current number of cached reverse proxies",
+		},
+	)
 )
 
 func MustRegister() {
@@ -115,6 +127,7 @@ func MustRegister() {
 		ClearanceIssued,
 		ChallengeStarted,
 		ChallengeSolved,
+		ChallengeStoreSize,
 		WSUpgrades,
 		BuildInfo,
 		RateLimitHits,
@@ -124,6 +137,7 @@ func MustRegister() {
 		ProxyLatency,
 		ProxyErrors,
 		ProxyCacheOps,
+		ProxyCacheSize,
 	}
 
 	for _, c := range collectors {

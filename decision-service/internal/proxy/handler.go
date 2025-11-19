@@ -277,6 +277,7 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 		h.proxiesLRU.Remove(cp.lruElement)
 		delete(h.proxies, originURL)
 		metrics.ProxyCacheOps.WithLabelValues("expiration").Inc()
+		metrics.ProxyCacheSize.Set(float64(len(h.proxies)))
 	}
 	h.proxiesMu.Unlock()
 
@@ -408,6 +409,7 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 			delete(h.proxies, evictCP.originURL)
 			h.proxiesLRU.Remove(back)
 			metrics.ProxyCacheOps.WithLabelValues("eviction").Inc()
+			metrics.ProxyCacheSize.Set(float64(len(h.proxies)))
 		}
 	}
 
@@ -420,6 +422,7 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 	// Add to front of LRU list (most recently used)
 	cp.lruElement = h.proxiesLRU.PushFront(cp)
 	h.proxies[originURL] = cp
+	metrics.ProxyCacheSize.Set(float64(len(h.proxies)))
 
 	return proxy
 }

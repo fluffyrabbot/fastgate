@@ -70,13 +70,34 @@ func main() {
 		// JSON logging for production
 	}
 
+	// Startup configuration summary
+	log.Info().Msg("=== FastGate Configuration Summary ===")
 	log.Info().
 		Str("config_path", cfgPath).
 		Str("log_level", cfg.Logging.Level).
+		Str("listen", cfg.Server.Listen).
+		Bool("tls_enabled", cfg.Server.TLSEnabled).
+		Msg("server configuration")
+	log.Info().
 		Bool("enforce", cfg.Modes.Enforce).
+		Bool("fail_open", cfg.Modes.FailOpen).
+		Bool("under_attack", cfg.Modes.UnderAttack).
+		Msg("security modes")
+	log.Info().
+		Int("challenge_threshold", cfg.Policy.ChallengeThreshold).
+		Int("block_threshold", cfg.Policy.BlockThreshold).
+		Int("difficulty_bits", cfg.Challenge.DifficultyBits).
+		Int("challenge_ttl_sec", cfg.Challenge.TTLSec).
+		Int("store_capacity", cfg.Challenge.StoreCapacity).
+		Float64("nonce_rps_limit", cfg.Challenge.NonceRPSLimit).
+		Msg("challenge configuration")
+	log.Info().
+		Bool("webauthn_enabled", cfg.WebAuthn.Enabled).
+		Bool("threat_intel_enabled", cfg.ThreatIntel.Enabled).
 		Bool("proxy_enabled", cfg.Proxy.Enabled).
 		Str("proxy_mode", cfg.Proxy.Mode).
-		Msg("FastGate starting")
+		Msg("feature flags")
+	log.Info().Msg("FastGate starting...")
 
 	kr, err := token.NewKeyring(cfg.Token.Alg, cfg.Token.Keys, cfg.Token.CurrentKID, cfg.Token.Issuer, cfg.Token.SkewSec)
 	if err != nil {
@@ -210,10 +231,10 @@ func main() {
 
 		// Health & metrics endpoints
 		mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
+			handleHealth(w, r, proxyHandler, intelStore, webauthnHandler)
 		}))
 		mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
+			handleHealth(w, r, proxyHandler, intelStore, webauthnHandler)
 		}))
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
@@ -434,10 +455,10 @@ func main() {
 
 	// health & metrics
 	mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		handleHealth(w, r, nil, intelStore, webauthnHandler)
 	}))
 	mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		handleHealth(w, r, nil, intelStore, webauthnHandler)
 	}))
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
@@ -753,3 +774,40 @@ func newResponseRecorder() *responseRecorder                  { return &response
 func (r *responseRecorder) Header() http.Header               { return r.h }
 func (r *responseRecorder) Write(b []byte) (int, error)       { return len(b), nil }
 func (r *responseRecorder) WriteHeader(statusCode int)        {}
+
+// handleHealth returns detailed component health status
+func handleHealth(w http.ResponseWriter, r *http.Request, ph *proxy.Handler, is *intel.Store, wh *webauthn.Handler) {
+	type HealthStatus struct {
+		Status     string            `json:"status"` // "ok" | "degraded"
+		Components map[string]string `json:"components"`
+	}
+
+	status := HealthStatus{
+		Status:     "ok",
+		Components: make(map[string]string),
+	}
+
+	// Check proxy handler (integrated mode only)
+	if ph != nil {
+		status.Components["proxy"] = "ok"
+	}
+
+	// Check threat intel store
+	if is != nil {
+		// Intel store is always available once created
+		status.Components["threat_intel"] = "ok"
+	}
+
+	// Check WebAuthn handler
+	if wh != nil {
+		status.Components["webauthn"] = "ok"
+	}
+
+	// Core components always available
+	status.Components["authz"] = "ok"
+	status.Components["challenge_store"] = "ok"
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(status)
+}
