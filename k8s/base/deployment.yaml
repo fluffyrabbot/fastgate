@@ -158,6 +158,7 @@ spec:
             failureThreshold: 3
 
           # Readiness probe - checks if ready to serve traffic
+          # Returns 503 if all circuit breakers are open (no healthy backends)
           readinessProbe:
             httpGet:
               path: /readyz
@@ -167,7 +168,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             successThreshold: 1
-            failureThreshold: 2
+            failureThreshold: 2  # Remove from service after 10s of failures
 
           # Startup probe - gives time for slow initialization
           startupProbe:
@@ -182,16 +183,12 @@ spec:
             failureThreshold: 12  # 60 seconds max startup time
 
           # Graceful shutdown
-          lifecycle:
-            preStop:
-              exec:
-                command:
-                  - /bin/sh
-                  - -c
-                  - sleep 10  # Allow time for load balancer to deregister
+          # Note: preStop hook removed - graceful shutdown with 5s pre-delay is handled in application code
+          # This allows the application to control the shutdown sequence and logging
 
       # Graceful termination period
-      terminationGracePeriodSeconds: 30
+      # 5s pre-shutdown delay + 30s connection draining + 10s buffer = 45s
+      terminationGracePeriodSeconds: 45
 
       # Volumes
       volumes:

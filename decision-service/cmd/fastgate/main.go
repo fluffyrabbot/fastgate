@@ -257,10 +257,10 @@ func main() {
 
 		// Health & metrics endpoints
 		mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleHealth(w, r, proxyHandler, intelStore, webauthnHandler)
+			handleLiveness(w, r)
 		}))
 		mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleHealth(w, r, proxyHandler, intelStore, webauthnHandler)
+			handleReadiness(w, r, proxyHandler, intelStore, webauthnHandler, cfg)
 		}))
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
@@ -321,10 +321,10 @@ func main() {
 
 		// health & metrics
 		mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleHealth(w, r, nil, intelStore, webauthnHandler)
+			handleLiveness(w, r)
 		}))
 		mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleHealth(w, r, nil, intelStore, webauthnHandler)
+			handleReadiness(w, r, nil, intelStore, webauthnHandler, cfg)
 		}))
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
@@ -387,39 +387,62 @@ func main() {
 	case sig := <-shutdown:
 		log.Info().Str("signal", sig.String()).Msg("received shutdown signal")
 
-		// Create shutdown context with 30s timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Pre-shutdown delay: allow load balancers/K8s to remove pod from service
+		// This prevents new connections from being established during shutdown
+		preShutdownDelay := 5 * time.Second
+		log.Info().
+			Dur("delay", preShutdownDelay).
+			Msg("waiting for load balancers to drain traffic")
+		time.Sleep(preShutdownDelay)
+
+		// Create shutdown context with 30s timeout for draining existing connections
+		shutdownTimeout := 30 * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 
-		// Stop pollers
+		log.Info().
+			Dur("timeout", shutdownTimeout).
+			Msg("beginning graceful shutdown with connection draining")
+
+		// Stop background services first
+		log.Debug().Msg("stopping threat intel pollers")
 		for _, p := range pollers {
 			p.Stop()
 		}
 
 		// Close intel store
 		if intelStore != nil {
+			log.Debug().Msg("closing threat intel store")
 			intelStore.Close()
 		}
 
 		// Shutdown authz handler (stop WebSocket timers)
 		if authzHandler != nil {
+			log.Debug().Msg("shutting down authz handler")
 			authzHandler.Shutdown()
 		}
 
-		// Shutdown proxy handler (if in integrated mode)
+		// Shutdown proxy handler (closes idle connections)
 		if proxyHandler != nil {
+			log.Debug().Msg("shutting down proxy handler")
 			if err := proxyHandler.Shutdown(ctx); err != nil {
 				log.Error().Err(err).Msg("proxy shutdown error")
 			}
 		}
 
-		// Gracefully shutdown HTTP server
+		// Gracefully shutdown HTTP server (waits for active connections to complete)
+		// This will block until all active requests complete or context timeout expires
+		log.Info().Msg("draining active HTTP connections")
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Warn().Err(err).Msg("graceful shutdown failed, forcing close")
+			log.Warn().Err(err).Msg("graceful shutdown timed out, forcing close")
 			srv.Close()
+		} else {
+			log.Info().Msg("all connections drained successfully")
 		}
 
-		log.Info().Msg("shutdown complete")
+		log.Info().
+			Dur("total_shutdown_time", time.Since(startTime)).
+			Msg("shutdown complete")
 	}
 }
 
@@ -1066,38 +1089,119 @@ func handleTestSuccess(w http.ResponseWriter, r *http.Request, cfg *config.Confi
 	w.Write([]byte(html))
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request, ph *proxy.Handler, is *intel.Store, wh *webauthn.Handler) {
-	type HealthStatus struct {
-		Status     string            `json:"status"` // "ok" | "degraded"
-		Components map[string]string `json:"components"`
+// handleLiveness is a simple liveness check for Kubernetes
+// Returns 200 if the process is alive and able to handle requests
+func handleLiveness(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "ok",
+		"check":  "liveness",
+	})
+}
+
+// handleReadiness checks if the service is ready to serve traffic
+// Returns 503 if all circuit breakers are open (no healthy backends)
+func handleReadiness(w http.ResponseWriter, r *http.Request, ph *proxy.Handler, is *intel.Store, wh *webauthn.Handler, cfg *config.Config) {
+	type ComponentHealth struct {
+		Status  string `json:"status"`  // "ok" | "degraded" | "down"
+		Details string `json:"details,omitempty"`
 	}
 
-	status := HealthStatus{
-		Status:     "ok",
-		Components: make(map[string]string),
+	type ReadinessStatus struct {
+		Status     string                     `json:"status"` // "ready" | "not_ready"
+		Components map[string]ComponentHealth `json:"components"`
+		Uptime     float64                    `json:"uptime_seconds"`
 	}
 
-	// Check proxy handler (integrated mode only)
-	if ph != nil {
-		status.Components["proxy"] = "ok"
+	status := ReadinessStatus{
+		Status:     "ready",
+		Components: make(map[string]ComponentHealth),
+		Uptime:     time.Since(startTime).Seconds(),
 	}
+
+	// Core components (always available)
+	status.Components["authz"] = ComponentHealth{Status: "ok"}
+	status.Components["challenge"] = ComponentHealth{Status: "ok"}
 
 	// Check threat intel store
 	if is != nil {
-		// Intel store is always available once created
-		status.Components["threat_intel"] = "ok"
+		status.Components["threat_intel"] = ComponentHealth{Status: "ok"}
 	}
 
 	// Check WebAuthn handler
 	if wh != nil {
-		status.Components["webauthn"] = "ok"
+		status.Components["webauthn"] = ComponentHealth{Status: "ok"}
 	}
 
-	// Core components always available
-	status.Components["authz"] = "ok"
-	status.Components["challenge_store"] = "ok"
+	// Check proxy handler and circuit breakers (integrated mode only)
+	if ph != nil && cfg.Proxy.CircuitBreaker.Enabled {
+		// Get all circuit breakers and check their state
+		allBreakers := ph.GetCircuitBreakers()
 
+		if len(allBreakers) == 0 {
+			// No backends registered yet - service is starting up, still ready
+			status.Components["proxy"] = ComponentHealth{
+				Status:  "ok",
+				Details: "no backends registered",
+			}
+		} else {
+			openCount := 0
+			halfOpenCount := 0
+			totalCount := len(allBreakers)
+
+			for backend, cb := range allBreakers {
+				cbState := cb.State()
+				switch cbState {
+				case 1: // StateOpen
+					openCount++
+					log.Debug().
+						Str("backend", backend).
+						Str("state", cbState.String()).
+						Msg("circuit breaker open during readiness check")
+				case 2: // StateHalfOpen
+					halfOpenCount++
+				}
+			}
+
+			// If ALL backends have open circuits, we're not ready
+			if openCount == totalCount {
+				status.Status = "not_ready"
+				status.Components["proxy"] = ComponentHealth{
+					Status:  "down",
+					Details: fmt.Sprintf("all %d backend(s) have open circuits", totalCount),
+				}
+			} else if openCount > 0 {
+				// Some backends down, but not all - degraded but still ready
+				status.Components["proxy"] = ComponentHealth{
+					Status:  "degraded",
+					Details: fmt.Sprintf("%d/%d backends with open circuits", openCount, totalCount),
+				}
+			} else if halfOpenCount > 0 {
+				// Some backends recovering - degraded but ready
+				status.Components["proxy"] = ComponentHealth{
+					Status:  "degraded",
+					Details: fmt.Sprintf("%d/%d backends in half-open state", halfOpenCount, totalCount),
+				}
+			} else {
+				// All backends healthy
+				status.Components["proxy"] = ComponentHealth{
+					Status:  "ok",
+					Details: fmt.Sprintf("%d backend(s) healthy", totalCount),
+				}
+			}
+		}
+	} else if ph != nil {
+		// Proxy enabled but circuit breaker disabled
+		status.Components["proxy"] = ComponentHealth{Status: "ok"}
+	}
+
+	// Return appropriate HTTP status code
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	if status.Status == "not_ready" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 	json.NewEncoder(w).Encode(status)
 }

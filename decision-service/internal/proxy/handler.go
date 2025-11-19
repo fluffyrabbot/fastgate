@@ -536,6 +536,14 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// GetCircuitBreakers returns all circuit breakers for health checking
+func (h *Handler) GetCircuitBreakers() map[string]*circuitbreaker.CircuitBreaker {
+	if h.circuitBreakers == nil {
+		return nil
+	}
+	return h.circuitBreakers.GetAll()
+}
+
 // serveChallengePage serves the challenge page and its assets using a robust file server.
 func (h *Handler) serveChallengePage(w http.ResponseWriter, r *http.Request) {
 	log.Debug().Str("path", r.URL.Path).Str("dir", h.challengePageDir).Msg("Serving challenge page asset")
