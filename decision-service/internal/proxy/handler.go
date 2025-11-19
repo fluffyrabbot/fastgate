@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fastgate/decision-service/internal/authz"
+	"fastgate/decision-service/internal/circuitbreaker"
 	"fastgate/decision-service/internal/config"
 	internalhttp "fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/metrics"
@@ -47,6 +48,7 @@ type Handler struct {
 	proxiesLRU       *list.List  // LRU list for cache eviction
 	proxiesMu        sync.RWMutex
 	challengePageDir string
+	circuitBreakers  *circuitbreaker.Manager
 }
 
 // NewHandler creates a new integrated proxy handler
@@ -60,12 +62,23 @@ func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDi
 		return nil, fmt.Errorf("challenge page directory does not exist: %s", challengePageDir)
 	}
 
+	// Initialize circuit breaker manager
+	cbConfig := circuitbreaker.Config{
+		FailureThreshold:        cfg.Proxy.CircuitBreaker.FailureThreshold,
+		SuccessThreshold:        cfg.Proxy.CircuitBreaker.SuccessThreshold,
+		Timeout:                 time.Duration(cfg.Proxy.CircuitBreaker.TimeoutSec) * time.Second,
+		MinimumRequestThreshold: cfg.Proxy.CircuitBreaker.MinimumRequestThreshold,
+		SlidingWindowSize:       time.Duration(cfg.Proxy.CircuitBreaker.SlidingWindowSec) * time.Second,
+	}
+	circuitBreakers := circuitbreaker.NewManager(cbConfig)
+
 	h := &Handler{
 		cfg:              cfg,
 		authzHandler:     authzHandler,
 		proxies:          make(map[string]*cachedProxy),
 		proxiesLRU:       list.New(),
 		challengePageDir: challengePageDir,
+		circuitBreakers:  circuitBreakers,
 	}
 
 	return h, nil
@@ -212,6 +225,21 @@ func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCo
 
 // proxyToOrigin forwards the request to the upstream origin
 func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originURL string) {
+	// Check circuit breaker (if enabled)
+	if h.cfg.Proxy.CircuitBreaker.Enabled {
+		cb := h.circuitBreakers.GetOrCreate(originURL)
+		if err := cb.Allow(); err != nil {
+			logger := internalhttp.GetLogger(r.Context())
+			logger.Warn().
+				Str("origin", originURL).
+				Str("state", cb.State().String()).
+				Msg("circuit breaker rejected request")
+			metrics.ProxyCircuitOpen.WithLabelValues(originURL).Inc()
+			http.Error(w, "service temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
+
 	// Get or create reverse proxy for this origin
 	proxy := h.getOrCreateProxy(originURL)
 	if proxy == nil {
@@ -267,13 +295,44 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 	ctx, cancel := context.WithTimeout(r.Context(), timeoutDuration)
 	defer cancel()
 
-	// Proxy the request with latency tracking
+	// Proxy the request with latency tracking and circuit breaker feedback
 	start := time.Now()
-	proxy.ServeHTTP(w, r.WithContext(ctx))
+
+	// Wrap response writer to capture status code for circuit breaker
+	var statusCode int
+	wrappedW := &statusCapturingWriter{
+		ResponseWriter: w,
+		statusCode:     &statusCode,
+	}
+
+	proxy.ServeHTTP(wrappedW, r.WithContext(ctx))
 	duration := time.Since(start)
 
 	// Record proxy latency metric
 	metrics.ProxyLatency.WithLabelValues(originURL).Observe(duration.Seconds())
+
+	// Record circuit breaker feedback (if enabled)
+	if h.cfg.Proxy.CircuitBreaker.Enabled {
+		cb := h.circuitBreakers.GetOrCreate(originURL)
+
+		// Consider 2xx and 3xx as success, 5xx as failure
+		// 4xx are client errors, not backend failures
+		if statusCode == 0 {
+			statusCode = http.StatusOK // Default if WriteHeader wasn't called
+		}
+
+		if statusCode >= 200 && statusCode < 400 {
+			cb.RecordSuccess()
+		} else if statusCode >= 500 {
+			cb.RecordFailure()
+			logger := internalhttp.GetLogger(r.Context())
+			logger.Debug().
+				Str("origin", originURL).
+				Int("status_code", statusCode).
+				Msg("circuit breaker recorded failure")
+		}
+		// 4xx errors don't count as backend failures
+	}
 }
 
 // getOrCreateProxy returns a reverse proxy for the given origin URL
@@ -586,4 +645,27 @@ func parseCookie(setCookie string) *http.Cookie {
 		return cookies[0]
 	}
 	return nil
+}
+
+// statusCapturingWriter wraps http.ResponseWriter to capture the status code
+type statusCapturingWriter struct {
+	http.ResponseWriter
+	statusCode *int
+	wroteHeader bool
+}
+
+func (w *statusCapturingWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		*w.statusCode = code
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (w *statusCapturingWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		*w.statusCode = http.StatusOK
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
 }

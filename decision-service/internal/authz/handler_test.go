@@ -76,7 +76,8 @@ func mockConfig() *config.Config {
 			Level: "debug",
 		},
 		Challenge: config.ChallengeCfg{
-			StoreCapacity: 100,
+			DifficultyBits: 16,
+			TTLSec:         60,
 		},
 	}
 	return cfg

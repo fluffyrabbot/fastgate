@@ -48,6 +48,16 @@ proxy:
   idle_timeout_ms: 90000
   max_body_size_mb: 100
 
+  # Circuit breaker for backend resilience
+  # Protects against cascading failures by failing fast when backend is unhealthy
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5        # Open circuit after 5 consecutive failures
+    success_threshold: 2         # Close circuit after 2 consecutive successes
+    timeout_sec: 30              # Wait 30s before attempting recovery
+    minimum_request_threshold: 3 # Need at least 3 requests to trip
+    sliding_window_sec: 10       # Track failures over 10s window
+
 challenge:
   difficulty_bits: 16   # Higher = harder (12-20 recommended, 16 for production)
   ttl_sec: 60

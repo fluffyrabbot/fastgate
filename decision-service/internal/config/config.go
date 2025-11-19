@@ -125,6 +125,16 @@ type ProxyCfg struct {
 	MaxIdleConnsPerHost  int          `yaml:"max_idle_conns_per_host"`
 	MaxConnsPerHost      int          `yaml:"max_conns_per_host"`
 	MaxBodySizeMB        int          `yaml:"max_body_size_mb"`
+
+	// Circuit breaker configuration
+	CircuitBreaker struct {
+		Enabled                 bool `yaml:"enabled"`
+		FailureThreshold        int  `yaml:"failure_threshold"`
+		SuccessThreshold        int  `yaml:"success_threshold"`
+		TimeoutSec              int  `yaml:"timeout_sec"`
+		MinimumRequestThreshold int  `yaml:"minimum_request_threshold"`
+		SlidingWindowSec        int  `yaml:"sliding_window_sec"`
+	} `yaml:"circuit_breaker"`
 }
 
 // ClusterCfg defines the Sovereign Mesh configuration
@@ -255,6 +265,22 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Proxy.MaxBodySizeMB == 0 {
 		cfg.Proxy.MaxBodySizeMB = 100
+	}
+	// Circuit breaker defaults
+	if cfg.Proxy.CircuitBreaker.FailureThreshold == 0 {
+		cfg.Proxy.CircuitBreaker.FailureThreshold = 5
+	}
+	if cfg.Proxy.CircuitBreaker.SuccessThreshold == 0 {
+		cfg.Proxy.CircuitBreaker.SuccessThreshold = 2
+	}
+	if cfg.Proxy.CircuitBreaker.TimeoutSec == 0 {
+		cfg.Proxy.CircuitBreaker.TimeoutSec = 30
+	}
+	if cfg.Proxy.CircuitBreaker.MinimumRequestThreshold == 0 {
+		cfg.Proxy.CircuitBreaker.MinimumRequestThreshold = 3
+	}
+	if cfg.Proxy.CircuitBreaker.SlidingWindowSec == 0 {
+		cfg.Proxy.CircuitBreaker.SlidingWindowSec = 10
 	}
 	// Compile route path patterns
 	for i := range cfg.Proxy.Routes {

@@ -1,0 +1,515 @@
+package circuitbreaker
+
+import (
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+)
+
+// Test circuit breaker starts in closed state
+func TestNew_InitialState(t *testing.T) {
+	config := DefaultConfig()
+	cb := New("test-backend", config)
+
+	if cb.State() != StateClosed {
+		t.Errorf("expected initial state to be closed, got %v", cb.State())
+	}
+
+	stats := cb.Stats()
+	if stats.Failures != 0 || stats.Successes != 0 || stats.Requests != 0 {
+		t.Errorf("expected zero counters, got failures=%d, successes=%d, requests=%d",
+			stats.Failures, stats.Successes, stats.Requests)
+	}
+}
+
+// Test circuit breaker allows requests in closed state
+func TestAllow_ClosedState(t *testing.T) {
+	config := DefaultConfig()
+	cb := New("test-backend", config)
+
+	if err := cb.Allow(); err != nil {
+		t.Errorf("expected closed circuit to allow request, got error: %v", err)
+	}
+
+	if cb.requests.Load() != 1 {
+		t.Errorf("expected request count to be 1, got %d", cb.requests.Load())
+	}
+}
+
+// Test circuit breaker opens after failure threshold
+func TestCircuitOpens_AfterFailures(t *testing.T) {
+	config := Config{
+		FailureThreshold:        3,
+		SuccessThreshold:        2,
+		Timeout:                 5 * time.Second,
+		MinimumRequestThreshold: 3,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	// Generate enough requests to meet minimum threshold
+	for i := 0; i < 3; i++ {
+		if err := cb.Allow(); err != nil {
+			t.Fatalf("unexpected error on request %d: %v", i, err)
+		}
+	}
+
+	// Record failures
+	for i := 0; i < 3; i++ {
+		cb.RecordFailure()
+	}
+
+	if cb.State() != StateOpen {
+		t.Errorf("expected circuit to be open after %d failures, got state: %v",
+			config.FailureThreshold, cb.State())
+	}
+
+	// Circuit should now reject requests
+	if err := cb.Allow(); err == nil {
+		t.Error("expected open circuit to reject requests")
+	}
+}
+
+// Test circuit breaker doesn't open with insufficient requests
+func TestCircuitDoesNotOpen_InsufficientRequests(t *testing.T) {
+	config := Config{
+		FailureThreshold:        3,
+		SuccessThreshold:        2,
+		Timeout:                 5 * time.Second,
+		MinimumRequestThreshold: 10, // High threshold
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	// Generate failures but below minimum threshold
+	for i := 0; i < 3; i++ {
+		cb.Allow()
+		cb.RecordFailure()
+	}
+
+	if cb.State() != StateClosed {
+		t.Errorf("expected circuit to remain closed with insufficient requests, got: %v", cb.State())
+	}
+}
+
+// Test circuit breaker transitions to half-open after timeout
+func TestCircuitHalfOpen_AfterTimeout(t *testing.T) {
+	config := Config{
+		FailureThreshold:        2,
+		SuccessThreshold:        2,
+		Timeout:                 100 * time.Millisecond, // Short timeout for testing
+		MinimumRequestThreshold: 2,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	// Open the circuit
+	for i := 0; i < 2; i++ {
+		cb.Allow()
+	}
+	cb.RecordFailure()
+	cb.RecordFailure()
+
+	if cb.State() != StateOpen {
+		t.Fatal("circuit should be open")
+	}
+
+	// Wait for timeout
+	time.Sleep(150 * time.Millisecond)
+
+	// Next request should transition to half-open
+	if err := cb.Allow(); err != nil {
+		t.Errorf("expected circuit to allow request after timeout, got error: %v", err)
+	}
+
+	if cb.State() != StateHalfOpen {
+		t.Errorf("expected circuit to be half-open after timeout, got: %v", cb.State())
+	}
+}
+
+// Test circuit breaker closes after success threshold in half-open
+func TestCircuitCloses_AfterSuccesses(t *testing.T) {
+	config := Config{
+		FailureThreshold:        2,
+		SuccessThreshold:        2,
+		Timeout:                 50 * time.Millisecond,
+		MinimumRequestThreshold: 2,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	// Open the circuit
+	for i := 0; i < 2; i++ {
+		cb.Allow()
+	}
+	cb.RecordFailure()
+	cb.RecordFailure()
+
+	// Wait for timeout and transition to half-open
+	time.Sleep(100 * time.Millisecond)
+	cb.Allow()
+
+	if cb.State() != StateHalfOpen {
+		t.Fatalf("expected half-open state, got: %v", cb.State())
+	}
+
+	// Record successes
+	cb.RecordSuccess() // First success
+	if cb.State() != StateHalfOpen {
+		t.Error("circuit should remain half-open after first success")
+	}
+
+	cb.RecordSuccess() // Second success - should close
+	if cb.State() != StateClosed {
+		t.Errorf("expected circuit to close after %d successes, got: %v",
+			config.SuccessThreshold, cb.State())
+	}
+
+	// Should allow requests now
+	if err := cb.Allow(); err != nil {
+		t.Errorf("closed circuit should allow requests, got error: %v", err)
+	}
+}
+
+// Test circuit breaker reopens on failure in half-open
+func TestCircuitReopens_OnHalfOpenFailure(t *testing.T) {
+	config := Config{
+		FailureThreshold:        2,
+		SuccessThreshold:        2,
+		Timeout:                 50 * time.Millisecond,
+		MinimumRequestThreshold: 2,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	// Open the circuit
+	for i := 0; i < 2; i++ {
+		cb.Allow()
+	}
+	cb.RecordFailure()
+	cb.RecordFailure()
+
+	// Wait and transition to half-open
+	time.Sleep(100 * time.Millisecond)
+	cb.Allow()
+
+	if cb.State() != StateHalfOpen {
+		t.Fatalf("expected half-open state, got: %v", cb.State())
+	}
+
+	// Record a failure - should immediately reopen
+	cb.RecordFailure()
+
+	if cb.State() != StateOpen {
+		t.Errorf("expected circuit to reopen on half-open failure, got: %v", cb.State())
+	}
+}
+
+// Test success resets failure counter in closed state
+func TestSuccess_ResetsFailures(t *testing.T) {
+	config := Config{
+		FailureThreshold:        3,
+		SuccessThreshold:        2,
+		Timeout:                 5 * time.Second,
+		MinimumRequestThreshold: 3,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	// Record some failures
+	for i := 0; i < 3; i++ {
+		cb.Allow()
+	}
+	cb.RecordFailure()
+	cb.RecordFailure()
+
+	if cb.failures.Load() != 2 {
+		t.Errorf("expected 2 failures, got %d", cb.failures.Load())
+	}
+
+	// Record a success - should reset failure counter
+	cb.RecordSuccess()
+
+	if cb.failures.Load() != 0 {
+		t.Errorf("expected failures to be reset to 0, got %d", cb.failures.Load())
+	}
+
+	if cb.State() != StateClosed {
+		t.Errorf("expected circuit to remain closed, got: %v", cb.State())
+	}
+}
+
+// Test concurrent access safety
+func TestConcurrentAccess(t *testing.T) {
+	config := Config{
+		FailureThreshold:        10,
+		SuccessThreshold:        5,
+		Timeout:                 100 * time.Millisecond,
+		MinimumRequestThreshold: 5,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	var wg sync.WaitGroup
+	concurrency := 100
+
+	// Concurrent Allow() calls
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cb.Allow()
+		}()
+	}
+
+	// Concurrent RecordSuccess() calls
+	for i := 0; i < concurrency/2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cb.RecordSuccess()
+		}()
+	}
+
+	// Concurrent RecordFailure() calls
+	for i := 0; i < concurrency/2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cb.RecordFailure()
+		}()
+	}
+
+	wg.Wait()
+
+	// Just verify no panics and circuit is in a valid state
+	state := cb.State()
+	if state != StateClosed && state != StateOpen && state != StateHalfOpen {
+		t.Errorf("invalid circuit state after concurrent access: %v", state)
+	}
+}
+
+// Test Manager GetOrCreate
+func TestManager_GetOrCreate(t *testing.T) {
+	config := DefaultConfig()
+	manager := NewManager(config)
+
+	cb1 := manager.GetOrCreate("backend-1")
+	cb2 := manager.GetOrCreate("backend-1")
+
+	if cb1 != cb2 {
+		t.Error("expected GetOrCreate to return same instance for same backend")
+	}
+
+	cb3 := manager.GetOrCreate("backend-2")
+	if cb3 == cb1 {
+		t.Error("expected GetOrCreate to return different instances for different backends")
+	}
+}
+
+// Test Manager GetAll
+func TestManager_GetAll(t *testing.T) {
+	config := DefaultConfig()
+	manager := NewManager(config)
+
+	backends := []string{"backend-1", "backend-2", "backend-3"}
+	for _, backend := range backends {
+		manager.GetOrCreate(backend)
+	}
+
+	all := manager.GetAll()
+	if len(all) != len(backends) {
+		t.Errorf("expected %d circuit breakers, got %d", len(backends), len(all))
+	}
+
+	for _, backend := range backends {
+		if _, ok := all[backend]; !ok {
+			t.Errorf("missing circuit breaker for backend: %s", backend)
+		}
+	}
+}
+
+// Test Manager Reset
+func TestManager_Reset(t *testing.T) {
+	config := Config{
+		FailureThreshold:        2,
+		SuccessThreshold:        2,
+		Timeout:                 5 * time.Second,
+		MinimumRequestThreshold: 2,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	manager := NewManager(config)
+
+	// Create and open a circuit
+	cb := manager.GetOrCreate("backend-1")
+	for i := 0; i < 2; i++ {
+		cb.Allow()
+	}
+	cb.RecordFailure()
+	cb.RecordFailure()
+
+	if cb.State() != StateOpen {
+		t.Fatal("circuit should be open")
+	}
+
+	// Reset all circuits
+	manager.Reset()
+
+	if cb.State() != StateClosed {
+		t.Errorf("expected circuit to be closed after reset, got: %v", cb.State())
+	}
+}
+
+// Test Reset method
+func TestReset(t *testing.T) {
+	config := Config{
+		FailureThreshold:        2,
+		SuccessThreshold:        2,
+		Timeout:                 5 * time.Second,
+		MinimumRequestThreshold: 2,
+		SlidingWindowSize:       10 * time.Second,
+	}
+	cb := New("test-backend", config)
+
+	// Open the circuit
+	for i := 0; i < 2; i++ {
+		cb.Allow()
+	}
+	cb.RecordFailure()
+	cb.RecordFailure()
+
+	if cb.State() != StateOpen {
+		t.Fatal("circuit should be open")
+	}
+
+	// Reset
+	cb.Reset()
+
+	if cb.State() != StateClosed {
+		t.Errorf("expected state to be closed after reset, got: %v", cb.State())
+	}
+
+	stats := cb.Stats()
+	if stats.Failures != 0 || stats.Successes != 0 || stats.Requests != 0 {
+		t.Errorf("expected zero counters after reset, got failures=%d, successes=%d, requests=%d",
+			stats.Failures, stats.Successes, stats.Requests)
+	}
+}
+
+// Test Stats method
+func TestStats(t *testing.T) {
+	config := DefaultConfig()
+	cb := New("test-backend", config)
+
+	// Generate some activity
+	cb.Allow()
+	cb.Allow()
+	cb.RecordFailure()
+
+	stats := cb.Stats()
+
+	if stats.Name != "test-backend" {
+		t.Errorf("expected name='test-backend', got: %s", stats.Name)
+	}
+
+	if stats.State != StateClosed {
+		t.Errorf("expected state=closed, got: %v", stats.State)
+	}
+
+	if stats.Failures != 1 {
+		t.Errorf("expected failures=1, got: %d", stats.Failures)
+	}
+
+	if stats.Requests != 2 {
+		t.Errorf("expected requests=2, got: %d", stats.Requests)
+	}
+
+	if stats.FailureThreshold != config.FailureThreshold {
+		t.Errorf("expected failure threshold=%d, got: %d", config.FailureThreshold, stats.FailureThreshold)
+	}
+}
+
+// Test State.String()
+func TestStateString(t *testing.T) {
+	tests := []struct {
+		state    State
+		expected string
+	}{
+		{StateClosed, "closed"},
+		{StateOpen, "open"},
+		{StateHalfOpen, "half-open"},
+		{State(99), "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("state_%d", tt.state), func(t *testing.T) {
+			if got := tt.state.String(); got != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
+// Test DefaultConfig
+func TestDefaultConfig(t *testing.T) {
+	config := DefaultConfig()
+
+	if config.FailureThreshold != 5 {
+		t.Errorf("expected failure threshold=5, got: %d", config.FailureThreshold)
+	}
+
+	if config.SuccessThreshold != 2 {
+		t.Errorf("expected success threshold=2, got: %d", config.SuccessThreshold)
+	}
+
+	if config.Timeout != 30*time.Second {
+		t.Errorf("expected timeout=30s, got: %v", config.Timeout)
+	}
+
+	if config.MinimumRequestThreshold != 3 {
+		t.Errorf("expected minimum request threshold=3, got: %d", config.MinimumRequestThreshold)
+	}
+
+	if config.SlidingWindowSize != 10*time.Second {
+		t.Errorf("expected sliding window=10s, got: %v", config.SlidingWindowSize)
+	}
+}
+
+// Benchmark concurrent Allow() calls
+func BenchmarkAllow(b *testing.B) {
+	config := DefaultConfig()
+	cb := New("test-backend", config)
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Allow()
+		}
+	})
+}
+
+// Benchmark RecordSuccess
+func BenchmarkRecordSuccess(b *testing.B) {
+	config := DefaultConfig()
+	cb := New("test-backend", config)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.RecordSuccess()
+		}
+	})
+}
+
+// Benchmark RecordFailure
+func BenchmarkRecordFailure(b *testing.B) {
+	config := DefaultConfig()
+	cb := New("test-backend", config)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.RecordFailure()
+		}
+	})
+}

@@ -53,6 +53,15 @@ data:
       max_idle_conns_per_host: 20
       max_conns_per_host: 100
 
+      # Circuit breaker for backend resilience
+      circuit_breaker:
+        enabled: true
+        failure_threshold: 5        # Open after 5 consecutive failures
+        success_threshold: 2         # Close after 2 consecutive successes
+        timeout_sec: 30              # Try recovery after 30 seconds
+        minimum_request_threshold: 3 # Min requests before tripping
+        sliding_window_sec: 10       # Failure tracking window
+
     challenge:
       difficulty_bits: 16  # Production setting
       ttl_sec: 60

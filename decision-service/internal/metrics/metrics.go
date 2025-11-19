@@ -118,6 +118,29 @@ var (
 			Help: "Current number of cached reverse proxies",
 		},
 	)
+
+	// Circuit breaker metrics
+	ProxyCircuitState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "fastgate_proxy_circuit_state",
+			Help: "Circuit breaker state by origin (0=closed, 1=open, 2=half-open)",
+		},
+		[]string{"origin"},
+	)
+	ProxyCircuitOpen = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_proxy_circuit_open_total",
+			Help: "Count of requests rejected due to open circuit breaker",
+		},
+		[]string{"origin"},
+	)
+	ProxyCircuitTransitions = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_proxy_circuit_transitions_total",
+			Help: "Circuit breaker state transitions by origin",
+		},
+		[]string{"origin", "from_state", "to_state"},
+	)
 )
 
 func MustRegister() {
@@ -138,6 +161,9 @@ func MustRegister() {
 		ProxyErrors,
 		ProxyCacheOps,
 		ProxyCacheSize,
+		ProxyCircuitState,
+		ProxyCircuitOpen,
+		ProxyCircuitTransitions,
 	}
 
 	for _, c := range collectors {

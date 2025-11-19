@@ -75,7 +75,8 @@ func mockConfig() *config.Config {
 			Level: "debug",
 		},
 		Challenge: config.ChallengeCfg{
-			StoreCapacity: 100,
+			DifficultyBits: 16,
+			TTLSec:         60,
 		},
 		Proxy: config.ProxyCfg{
 			Enabled:       true,
