@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"net/http"
@@ -93,7 +95,6 @@ func main() {
 		Int("block_threshold", cfg.Policy.BlockThreshold).
 		Int("difficulty_bits", cfg.Challenge.DifficultyBits).
 		Int("challenge_ttl_sec", cfg.Challenge.TTLSec).
-		Int("store_capacity", cfg.Challenge.StoreCapacity).
 		Float64("nonce_rps_limit", cfg.Challenge.NonceRPSLimit).
 		Msg("challenge configuration")
 	log.Info().
@@ -110,9 +111,19 @@ func main() {
 	}
 	authzHandler := authz.NewHandler(cfg, kr)
 
-
-	// Challenge store (bounded LRU inside; default capacity).
-	chStore := challenge.NewStore(time.Duration(cfg.Challenge.TTLSec) * time.Second)
+	// Stateless Challenge Issuer (replaces stateful store)
+	// Use Cluster SecretKey if available, otherwise generate ephemeral random key
+	issuerSecret := cfg.Cluster.SecretKey
+	if issuerSecret == "" {
+		log.Warn().Msg("cluster.secret_key not set; generating ephemeral secret for challenge signing (will not survive restart)")
+		rnd := make([]byte, 32)
+		rand.Read(rnd)
+		issuerSecret = base64.RawURLEncoding.EncodeToString(rnd)
+	}
+	chIssuer, err := challenge.NewIssuer(issuerSecret)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to create challenge issuer")
+	}
 
 	// Per-IP guard for challenge/nonce issuance.
 	chNonceRPS := rate.NewSlidingRPS(10)
@@ -216,10 +227,10 @@ func main() {
 
 		// Challenge endpoints (for PoW and WebAuthn challenges)
 		mux.Handle("/v1/challenge/nonce", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleChallengeNonce(w, r, cfg, chStore, chNonceRPS)
+			handleChallengeNonce(w, r, cfg, chIssuer, chNonceRPS)
 		}))
 		mux.Handle("/v1/challenge/complete", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleChallengeComplete(w, r, cfg, chStore, kr)
+			handleChallengeComplete(w, r, cfg, chIssuer, kr)
 		}))
 
 		// WebAuthn endpoints (if enabled)
@@ -262,212 +273,50 @@ func main() {
 
 		// /v1/authz — called via NGINX auth_request
 		mux.Handle("/v1/authz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Observe mode: always allow, but run handler to issue cookies/metrics
-		if !cfg.Modes.Enforce {
-			rr := newResponseRecorder()
-			authzHandler.ServeHTTP(rr, r)
-			if sc := rr.Header().Get("Set-Cookie"); sc != "" {
-				w.Header().Set("Set-Cookie", sc)
-			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		authzHandler.ServeHTTP(w, r)
-	}))
-
-	// /v1/challenge/nonce — issue PoW nonce
-	mux.Handle("/v1/challenge/nonce", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Method & body caps
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
-			return
-		}
-		// Limit request body size
-		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBytes)
-		defer r.Body.Close()
-
-		type Req struct {
-			ReturnURL string `json:"return_url"`
-		}
-		var req Req
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
-			return
-		}
-		retURL := sanitizeReturnURL(req.ReturnURL)
-
-		// Per-IP RPS guard
-		ip := clientIPFromHeaders(r)
-		if ip != "" {
-			if rps := chNonceRPS.Add("nonce:" + ip); rps > cfg.Challenge.NonceRPSLimit {
-				metrics.RateLimitHits.WithLabelValues("challenge_nonce").Inc()
-				w.Header().Set("Retry-After", strconv.Itoa(cfg.Challenge.RetryAfterSec))
-				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
-				return
-			}
-		}
-
-		// Mint challenge with configured difficulty & retries
-		id, nonce, err := chStore.NewWithMaxRetries(cfg.Challenge.DifficultyBits, cfg.Challenge.MaxRetries)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
-			return
-		}
-		metrics.ChallengeStarted.Inc()
-
-		resp := map[string]any{
-			"challenge_id":    id,
-			"nonce":           nonce,
-			"difficulty_bits": cfg.Challenge.DifficultyBits,
-			"expires_at":      time.Now().Add(time.Duration(cfg.Challenge.TTLSec) * time.Second).UTC().Format(time.RFC3339),
-			"return_url":      retURL,
-		}
-		writeJSON(w, http.StatusOK, resp)
-	}))
-
-	// /v1/challenge/complete — validate PoW, mint clearance, redirect
-	mux.Handle("/v1/challenge/complete", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxEntropyBytes) // Allow larger payloads for entropy data
-		defer r.Body.Close()
-
-		type Req struct {
-			ChallengeID string                `json:"challenge_id"`
-			Nonce       string                `json:"nonce"`
-			Solution    uint32                `json:"solution"`
-			ReturnURL   string                `json:"return_url"`
-			UAHints     map[string]any        `json:"ua_hints"`
-			Entropy     *entropy.Profile      `json:"entropy,omitempty"`
-		}
-		var req Req
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
-			return
-		}
-		if req.ChallengeID == "" || req.Nonce == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_fields"})
-			return
-		}
-
-		// Validate entropy payload to prevent DoS via unbounded arrays
-		if req.Entropy != nil {
-			const maxAnomalies = 50 // Reasonable upper bound for anomaly counts
-			if len(req.Entropy.Anomalies.Hardware) > maxAnomalies ||
-				len(req.Entropy.Anomalies.Behavioral) > maxAnomalies ||
-				len(req.Entropy.Anomalies.Environment) > maxAnomalies {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too_many_anomalies"})
-				return
-			}
-		}
-
-		retURL := sanitizeReturnURL(req.ReturnURL)
-
-		// Atomically validate and consume
-		ok, reason, _ := chStore.TrySolve(req.ChallengeID, req.Nonce, req.Solution)
-		if !ok {
-			// Debug logging for challenge validation failures
-			if cfg.Logging.Level == "debug" {
-				clientIP := clientIPFromHeaders(r)
-				log.Debug().
-					Str("reason", reason).
-					Str("challenge_id", req.ChallengeID).
-					Str("client_ip", clientIP).
-					Msg("challenge validation failed")
-			}
-
-			switch reason {
-			case "not_found", "expired":
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
-				return
-			case "invalid_nonce", "invalid_solution":
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
-				return
-			case "too_many_retries":
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
-				return
-			default:
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid"})
-				return
-			}
-		}
-
-		// Success — analyze entropy and issue clearance cookie
-		tier := "low" // Default tier for PoW completion
-
-		// Analyze entropy if provided
-		if req.Entropy != nil {
-			analyzer := entropy.NewAnalyzer()
-			assessment := analyzer.Analyze(req.Entropy)
-
-			if cfg.Logging.Level == "debug" {
-				log.Debug().
-					Float64("bot_score", assessment.BotScore).
-					Float64("confidence", assessment.Confidence).
-					Bool("suspicious", assessment.IsSuspicious).
-					Interface("reasons", assessment.Reasons).
-					Msg("entropy assessment")
-			}
-
-			// Upgrade tier if low bot score and high confidence
-			if !assessment.IsSuspicious && assessment.Confidence >= 0.5 {
-				tier = "medium" // Upgrade to medium for human-like behavior
-			}
-
-			// Downgrade tier if high bot score
-			if assessment.IsBot {
-				tier = "low" // Keep low tier for bot-like behavior
-				if cfg.Logging.Level == "debug" {
-					log.Debug().
-						Float64("bot_score", assessment.BotScore).
-						Interface("reasons", assessment.Reasons).
-						Msg("bot detected")
+			// Observe mode: always allow, but run handler to issue cookies/metrics
+			if !cfg.Modes.Enforce {
+				rr := newResponseRecorder()
+				authzHandler.ServeHTTP(rr, r)
+				if sc := rr.Header().Get("Set-Cookie"); sc != "" {
+					w.Header().Set("Set-Cookie", sc)
 				}
+				w.WriteHeader(http.StatusNoContent)
+				return
 			}
+			authzHandler.ServeHTTP(w, r)
+		}))
+
+		// /v1/challenge/nonce — issue PoW nonce
+		mux.Handle("/v1/challenge/nonce", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleChallengeNonce(w, r, cfg, chIssuer, chNonceRPS)
+		}))
+
+		// /v1/challenge/complete — validate PoW, mint clearance, redirect
+		mux.Handle("/v1/challenge/complete", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleChallengeComplete(w, r, cfg, chIssuer, kr)
+		}))
+
+		// WebAuthn endpoints (if enabled)
+		if webauthnHandler != nil {
+			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
+			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
+			log.Info().Msg("WebAuthn endpoints registered")
 		}
 
-		tokenStr, err := kr.Sign(tier, cfg.CookieMaxAge())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
-			return
-		}
-		http.SetCookie(w, httputil.BuildCookie(cfg, tokenStr))
-		metrics.ChallengeSolved.Inc()
-
-		if cfg.Logging.Level == "debug" {
-			log.Debug().Str("tier", tier).Msg("clearance issued")
+		// TAXII endpoints (if threat intel enabled)
+		if taxiiServer != nil {
+			mux.Handle("/taxii2/collections/", http.HandlerFunc(taxiiServer.HandleCollections))
+			mux.Handle("/taxii2/collections/fastgate/objects/", http.HandlerFunc(taxiiServer.HandleObjects))
+			log.Info().Msg("TAXII endpoints registered")
 		}
 
-		if retURL == "" {
-			retURL = "/"
-		}
-		w.Header().Set("Location", retURL)
-		w.WriteHeader(http.StatusFound) // 302
-	}))
-
-	// WebAuthn endpoints (if enabled)
-	if webauthnHandler != nil {
-		mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
-		mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
-		log.Info().Msg("WebAuthn endpoints registered")
-	}
-
-	// TAXII endpoints (if threat intel enabled)
-	if taxiiServer != nil {
-		mux.Handle("/taxii2/collections/", http.HandlerFunc(taxiiServer.HandleCollections))
-		mux.Handle("/taxii2/collections/fastgate/objects/", http.HandlerFunc(taxiiServer.HandleObjects))
-		log.Info().Msg("TAXII endpoints registered")
-	}
-
-	// health & metrics
-	mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleHealth(w, r, nil, intelStore, webauthnHandler)
-	}))
-	mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleHealth(w, r, nil, intelStore, webauthnHandler)
-	}))
+		// health & metrics
+		mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleHealth(w, r, nil, intelStore, webauthnHandler)
+		}))
+		mux.Handle("/readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleHealth(w, r, nil, intelStore, webauthnHandler)
+		}))
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
 
@@ -504,7 +353,7 @@ func main() {
 	go func() {
 		log.Info().
 			Str("listen", cfg.Server.Listen).
-			Int("challenge_cap", cfg.Challenge.StoreCapacity).
+			Int("difficulty", cfg.Challenge.DifficultyBits).
 			Float64("rps_guard", cfg.Challenge.NonceRPSLimit).
 			Msg("FastGate Decision Service listening")
 		if cfg.Server.TLSEnabled {
@@ -603,11 +452,6 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Challenges
-	if mf := findMF("fastgate_challenge_store_size"); mf != nil {
-		if len(mf.Metric) > 0 {
-			stats["challenges"]["active"] = mf.Metric[0].Gauge.GetValue()
-		}
-	}
 	if mf := findMF("fastgate_challenge_started_total"); mf != nil {
 		if len(mf.Metric) > 0 {
 			stats["challenges"]["started"] = mf.Metric[0].Counter.GetValue()
@@ -677,7 +521,7 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 
 // ---- Challenge Handler Functions (for integrated mode) ----
 
-func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Config, chStore *challenge.Store, chNonceRPS *rate.SlidingRPS) {
+func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Config, chIssuer *challenge.StatelessIssuer, chNonceRPS *rate.SlidingRPS) {
 	// Method & body caps
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
@@ -709,7 +553,7 @@ func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Co
 	}
 
 	// Mint challenge with configured difficulty & retries
-	id, nonce, err := chStore.NewWithMaxRetries(cfg.Challenge.DifficultyBits, cfg.Challenge.MaxRetries)
+	token, nonce, err := chIssuer.Issue(cfg.Challenge.DifficultyBits, time.Duration(cfg.Challenge.TTLSec)*time.Second, ip)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
@@ -717,7 +561,7 @@ func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Co
 	metrics.ChallengeStarted.Inc()
 
 	resp := map[string]any{
-		"challenge_id":    id,
+		"challenge_id":    token, // Stateless: ID is the signed token
 		"nonce":           nonce,
 		"difficulty_bits": cfg.Challenge.DifficultyBits,
 		"expires_at":      time.Now().Add(time.Duration(cfg.Challenge.TTLSec) * time.Second).UTC().Format(time.RFC3339),
@@ -726,7 +570,7 @@ func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Co
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config.Config, chStore *challenge.Store, kr *token.Keyring) {
+func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config.Config, chIssuer *challenge.StatelessIssuer, kr *token.Keyring) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 		return
@@ -764,34 +608,21 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 	}
 
 	retURL := sanitizeReturnURL(req.ReturnURL)
+	clientIP := clientIPFromHeaders(r)
 
-	// Atomically validate and consume
-	ok, reason, _ := chStore.TrySolve(req.ChallengeID, req.Nonce, req.Solution)
+	// Verify JWS token (stateless)
+	ok, reason, _ := chIssuer.Verify(req.ChallengeID, req.Solution, clientIP)
 	if !ok {
 		// Debug logging for challenge validation failures
 		if cfg.Logging.Level == "debug" {
-			clientIP := clientIPFromHeaders(r)
 			log.Debug().
 				Str("reason", reason).
-				Str("challenge_id", req.ChallengeID).
 				Str("client_ip", clientIP).
 				Msg("challenge validation failed")
 		}
 
-		switch reason {
-		case "not_found", "expired":
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
-			return
-		case "invalid_nonce", "invalid_solution":
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
-			return
-		case "too_many_retries":
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
-			return
-		default:
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid"})
-			return
-		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
+		return
 	}
 
 	// Success — analyze entropy and issue clearance cookie

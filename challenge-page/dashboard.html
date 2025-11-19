@@ -129,11 +129,7 @@
 
         <!-- Challenges -->
         <div class="card">
-            <div class="card-title">Challenges (PoW)</div>
-            <div class="stat-row">
-                <span class="stat-label">Active (Store)</span>
-                <span class="stat-value col-accent" id="ch-active">0</span>
-            </div>
+            <div class="card-title">Challenges (Stateless)</div>
             <div class="stat-row">
                 <span class="stat-label">Started</span>
                 <span class="stat-value" id="ch-started">0</span>
@@ -207,7 +203,6 @@
                 set('dec-invalid', data.decisions?.invalid_tokens);
 
                 // Challenges
-                set('ch-active', data.challenges?.active);
                 set('ch-started', data.challenges?.started);
                 set('ch-solved', data.challenges?.solved);
                 

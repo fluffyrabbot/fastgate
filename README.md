@@ -84,14 +84,19 @@ The dashboard visualizes:
 
 ## Architecture
 
-### Integrated Mode (Simple)
+### Integrated Mode (Simple / Sovereign)
 ```
 Client → FastGate (:8080) → Your App
          ↓
-      Challenge page
+      Stateless JWE Challenge
          &
       Admin Dashboard
 ```
+
+### Sovereign Mesh
+FastGate is designed for sovereignty.
+- **Stateless Challenges:** Uses JWE (Encrypted JWT) to manage challenge state without a database. Scale to infinity.
+- **Cluster Config:** Set `cluster.secret_key` to share state across multiple nodes securely.
 
 ### NGINX Mode (Advanced)
 ```
