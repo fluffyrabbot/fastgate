@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FastGate Dashboard</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text: #e2e8f0;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+        }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 2rem;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--card-bg);
+            padding-bottom: 1rem;
+        }
+        .title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: var(--success);
+            box-shadow: 0 0 10px var(--success);
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .card-title {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 1rem;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 0.75rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .stat-row:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+        .stat-label {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+        .stat-value {
+            font-size: 1.25rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+        .col-success { color: var(--success); }
+        .col-danger { color: var(--danger); }
+        .col-warning { color: var(--warning); }
+        .col-accent { color: var(--accent); }
+        
+        .refresh-indicator {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">
+            <div class="status-dot"></div>
+            FastGate Admin
+        </div>
+        <div class="refresh-indicator" id="last-updated">Connecting...</div>
+    </div>
+
+    <div class="grid">
+        <!-- Authorization Decisions -->
+        <div class="card">
+            <div class="card-title">Decisions</div>
+            <div class="stat-row">
+                <span class="stat-label">Allowed</span>
+                <span class="stat-value col-success" id="dec-allow">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Challenged</span>
+                <span class="stat-value col-warning" id="dec-challenge">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Blocked</span>
+                <span class="stat-value col-danger" id="dec-block">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Invalid Tokens</span>
+                <span class="stat-value" id="dec-invalid">0</span>
+            </div>
+        </div>
+
+        <!-- Challenges -->
+        <div class="card">
+            <div class="card-title">Challenges (PoW)</div>
+            <div class="stat-row">
+                <span class="stat-label">Active (Store)</span>
+                <span class="stat-value col-accent" id="ch-active">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Started</span>
+                <span class="stat-value" id="ch-started">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Solved</span>
+                <span class="stat-value col-success" id="ch-solved">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Success Rate</span>
+                <span class="stat-value" id="ch-rate">0%</span>
+            </div>
+        </div>
+
+        <!-- WebAuthn -->
+        <div class="card">
+            <div class="card-title">WebAuthn</div>
+            <div class="stat-row">
+                <span class="stat-label">Success (Total)</span>
+                <span class="stat-value col-success" id="wa-success">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Failed</span>
+                <span class="stat-value col-danger" id="wa-failed">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Rate Limits (Begin)</span>
+                <span class="stat-value col-warning" id="wa-rl-begin">0</span>
+            </div>
+        </div>
+
+        <!-- Proxy / System -->
+        <div class="card">
+            <div class="card-title">Proxy & System</div>
+            <div class="stat-row">
+                <span class="stat-label">Proxy Errors</span>
+                <span class="stat-value col-danger" id="px-errors">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Active Cache</span>
+                <span class="stat-value" id="px-cache">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Goroutines</span>
+                <span class="stat-value col-accent" id="sys-go">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Uptime</span>
+                <span class="stat-value" id="sys-uptime">0s</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const updateStats = async () => {
+            try {
+                const res = await fetch('/admin/stats');
+                if (!res.ok) throw new Error('Failed to fetch stats');
+                const data = await res.json();
+
+                // Helper to animate numbers (optional, kept simple for now)
+                const set = (id, val) => {
+                    const el = document.getElementById(id);
+                    if (el) el.innerText = val !== undefined ? val : 0;
+                };
+
+                // Decisions
+                set('dec-allow', data.decisions?.allow);
+                set('dec-challenge', data.decisions?.challenge);
+                set('dec-block', data.decisions?.block);
+                set('dec-invalid', data.decisions?.invalid_tokens);
+
+                // Challenges
+                set('ch-active', data.challenges?.active);
+                set('ch-started', data.challenges?.started);
+                set('ch-solved', data.challenges?.solved);
+                
+                const started = data.challenges?.started || 0;
+                const solved = data.challenges?.solved || 0;
+                const rate = started > 0 ? Math.round((solved / started) * 100) : 0;
+                set('ch-rate', rate + '%');
+
+                // WebAuthn
+                set('wa-success', data.webauthn?.success);
+                set('wa-failed', data.webauthn?.failed);
+                set('wa-rl-begin', data.webauthn?.rate_limit_begin);
+
+                // Proxy/System
+                set('px-errors', data.proxy?.errors);
+                set('px-cache', data.proxy?.cache_size);
+                set('sys-go', data.system?.goroutines);
+                
+                // Format uptime
+                const uptimeSec = data.system?.uptime_sec || 0;
+                const hours = Math.floor(uptimeSec / 3600);
+                const mins = Math.floor((uptimeSec % 3600) / 60);
+                set('sys-uptime', `${hours}h ${mins}m`);
+
+                document.getElementById('last-updated').innerText = 'Updated: ' + new Date().toLocaleTimeString();
+            } catch (e) {
+                console.error(e);
+                document.getElementById('last-updated').innerText = 'Error connecting to server';
+            }
+        };
+
+        // Poll every 2 seconds
+        setInterval(updateStats, 2000);
+        updateStats();
+    </script>
+</body>
+</html>

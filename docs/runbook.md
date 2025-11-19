@@ -24,6 +24,8 @@ Set `under_attack: true` to bias scoring up (more challenges) without changing p
 
 ## Health & metrics
 - `GET /healthz` and `/readyz` on the decision service return 200.
+- `GET /admin/stats` returns a JSON summary of key metrics (Integrated Mode only).
+- **Admin Dashboard**: Accessible at `/__uam/dashboard.html` (e.g., http://localhost:8080/__uam/dashboard.html).
 - `GET /metrics` exposes Prometheus metrics:
   - `fastgate_authz_decision_total{action}`
   - `fastgate_clearance_issued_total`

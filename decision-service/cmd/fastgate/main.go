@@ -24,7 +24,9 @@ import (
 	"fastgate/decision-service/internal/token"
 	"fastgate/decision-service/internal/webauthn"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -33,6 +35,9 @@ const (
 	maxJSONBytes    = 4 * 1024  // 4KB body cap for challenge/nonce endpoint
 	maxEntropyBytes = 16 * 1024 // 16KB for challenge/complete with entropy data
 )
+
+// System uptime tracking
+var startTime = time.Now()
 
 func main() {
 	// CLI flag support for config path
@@ -238,6 +243,9 @@ func main() {
 		}))
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
+		
+		// Admin stats endpoint for dashboard
+		mux.Handle("/admin/stats", http.HandlerFunc(handleAdminStats))
 
 		// Proxy handler for all other requests
 		mux.Handle("/", proxyHandler)
@@ -463,6 +471,9 @@ func main() {
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
 
+		// Admin stats endpoint for dashboard
+		mux.Handle("/admin/stats", http.HandlerFunc(handleAdminStats))
+
 		// Apply middleware chain: request ID → common headers
 		handler = Chain(
 			httputil.RequestIDMiddleware(log.Logger),
@@ -547,6 +558,121 @@ func main() {
 
 		log.Info().Msg("shutdown complete")
 	}
+}
+
+// handleAdminStats aggregates metrics into a JSON summary for the admin dashboard
+func handleAdminStats(w http.ResponseWriter, r *http.Request) {
+	// Gather metrics from Prometheus registry
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "metrics_error"})
+		return
+	}
+
+	stats := make(map[string]map[string]any)
+	stats["decisions"] = make(map[string]any)
+	stats["challenges"] = make(map[string]any)
+	stats["webauthn"] = make(map[string]any)
+	stats["proxy"] = make(map[string]any)
+	stats["system"] = make(map[string]any)
+
+	// Helper to find a metric family by name
+	findMF := func(name string) *dto.MetricFamily {
+		for _, mf := range mfs {
+			if mf.GetName() == name {
+				return mf
+			}
+		}
+		return nil
+	}
+
+	// 1. Decisions
+	if mf := findMF("fastgate_authz_decision_total"); mf != nil {
+		for _, m := range mf.Metric {
+			for _, label := range m.Label {
+				if label.GetName() == "action" {
+					stats["decisions"][label.GetValue()] = m.Counter.GetValue()
+				}
+			}
+		}
+	}
+	if mf := findMF("fastgate_invalid_tokens_total"); mf != nil {
+		if len(mf.Metric) > 0 {
+			stats["decisions"]["invalid_tokens"] = mf.Metric[0].Counter.GetValue()
+		}
+	}
+
+	// 2. Challenges
+	if mf := findMF("fastgate_challenge_store_size"); mf != nil {
+		if len(mf.Metric) > 0 {
+			stats["challenges"]["active"] = mf.Metric[0].Gauge.GetValue()
+		}
+	}
+	if mf := findMF("fastgate_challenge_started_total"); mf != nil {
+		if len(mf.Metric) > 0 {
+			stats["challenges"]["started"] = mf.Metric[0].Counter.GetValue()
+		}
+	}
+	if mf := findMF("fastgate_challenge_solved_total"); mf != nil {
+		if len(mf.Metric) > 0 {
+			stats["challenges"]["solved"] = mf.Metric[0].Counter.GetValue()
+		}
+	}
+
+	// 3. WebAuthn
+	if mf := findMF("fastgate_webauthn_attestation_total"); mf != nil {
+		success := 0.0
+		failed := 0.0
+		for _, m := range mf.Metric {
+			val := m.Counter.GetValue()
+			for _, label := range m.Label {
+				if label.GetName() == "result" {
+					if label.GetValue() == "success" {
+						success += val
+					} else {
+						failed += val
+					}
+				}
+			}
+		}
+		stats["webauthn"]["success"] = success
+		stats["webauthn"]["failed"] = failed
+	}
+	if mf := findMF("fastgate_rate_limit_hits_total"); mf != nil {
+		for _, m := range mf.Metric {
+			for _, label := range m.Label {
+				if label.GetName() == "endpoint" {
+					if label.GetValue() == "webauthn_begin" {
+						stats["webauthn"]["rate_limit_begin"] = m.Counter.GetValue()
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Proxy
+	if mf := findMF("fastgate_proxy_errors_total"); mf != nil {
+		totalErrors := 0.0
+		for _, m := range mf.Metric {
+			totalErrors += m.Counter.GetValue()
+		}
+		stats["proxy"]["errors"] = totalErrors
+	}
+	if mf := findMF("fastgate_proxy_cache_size"); mf != nil {
+		if len(mf.Metric) > 0 {
+			stats["proxy"]["cache_size"] = mf.Metric[0].Gauge.GetValue()
+		}
+	}
+
+	// 5. System
+	if mf := findMF("go_goroutines"); mf != nil {
+		if len(mf.Metric) > 0 {
+			stats["system"]["goroutines"] = mf.Metric[0].Gauge.GetValue()
+		}
+	}
+	stats["system"]["uptime_sec"] = time.Since(startTime).Seconds()
+
+	writeJSON(w, http.StatusOK, stats)
 }
 
 // ---- Challenge Handler Functions (for integrated mode) ----

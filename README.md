@@ -68,6 +68,20 @@ Headless clients and high-risk paths (e.g., `/login`) are challenged.
 
 See `docs/config.md` and `docs/runbook.md` for details.
 
+## Observability
+
+FastGate includes a lightweight, built-in **Admin Dashboard** (Integrated Mode only) for real-time monitoring.
+
+- **Dashboard:** `http://<host>/__uam/dashboard.html`
+- **JSON Stats:** `http://<host>/admin/stats`
+- **Prometheus:** `http://<host>/metrics`
+
+The dashboard visualizes:
+- Real-time allow/block/challenge rates
+- Challenge solver success rates (PoW)
+- WebAuthn statistics
+- System health and proxy errors
+
 ## Architecture
 
 ### Integrated Mode (Simple)
@@ -75,6 +89,8 @@ See `docs/config.md` and `docs/runbook.md` for details.
 Client → FastGate (:8080) → Your App
          ↓
       Challenge page
+         &
+      Admin Dashboard
 ```
 
 ### NGINX Mode (Advanced)
