@@ -1,0 +1,123 @@
+version: v1
+
+# PRODUCTION CONFIGURATION EXAMPLE
+# ⚠️  BEFORE USING IN PRODUCTION:
+# 1. Generate new secrets: openssl rand -base64 32
+# 2. Configure trusted_proxies for your load balancer
+# 3. Enable TLS and set secure: true for cookies
+# 4. Review all settings for your deployment
+
+server:
+  listen: ":8080"
+  read_timeout_ms: 5000
+  write_timeout_ms: 10000
+
+  # SECURITY: Enable TLS in production
+  tls_enabled: true
+  tls_cert_file: "/etc/fastgate/tls/cert.pem"
+  tls_key_file: "/etc/fastgate/tls/key.pem"
+
+  # SECURITY: Configure trusted proxy CIDRs to prevent IP spoofing
+  # Only these IPs can send X-Forwarded-For headers that will be trusted
+  # Example: AWS ALB, GCP Load Balancer, or your internal proxy network
+  trusted_proxies:
+    - "10.0.0.0/8"       # Internal VPC
+    - "172.16.0.0/12"    # Load balancer subnet
+    # - "192.168.0.0/16" # Add your specific subnets
+
+cookie:
+  name: "Clearance"
+  same_site: "Lax"
+  max_age_sec: 3600
+  secure: true          # SECURITY: Must be true in production with TLS
+  http_only: true
+  # domain: ".example.com"  # Set for multi-subdomain deployments
+
+modes:
+  enforce: true
+  fail_open: false      # SECURITY: Set to false in production
+  under_attack: false   # Enable during active DDoS attacks
+
+proxy:
+  enabled: true
+  mode: "integrated"
+  origin: "http://localhost:3000"  # Your backend application
+
+  challenge_path: "/__uam"
+  timeout_ms: 30000
+  idle_timeout_ms: 90000
+  max_body_size_mb: 100
+
+challenge:
+  difficulty_bits: 16   # Higher = harder (12-20 recommended, 16 for production)
+  ttl_sec: 60
+  max_retries: 3
+  nonce_rps_limit: 5.0
+  retry_after_sec: 2
+
+webauthn:
+  enabled: true
+  rp_id: "example.com"  # MUST match your domain
+  rp_name: "Example Application"
+  rp_origins:
+    - "https://example.com"  # MUST use HTTPS in production
+  ttl_sec: 60
+
+token:
+  alg: "HS256"
+  keys:
+    # SECURITY: Generate unique production secret
+    # Command: openssl rand -base64 32
+    v1: "fVh1Q67FXH0UxknQAlD5oY81V7W8Zc/r4kk71fUzL4w="  # REPLACE THIS
+  current_kid: "v1"
+  issuer: "fastgate"
+  skew_sec: 30
+
+policy:
+  challenge_threshold: 30   # Score >= 30 triggers challenge
+  block_threshold: 100      # Score >= 100 blocks immediately
+  ip_rps_threshold: 100     # Requests per 10s per IP
+  token_rps_threshold: 50
+
+  paths:
+    # Example: High-value endpoints get base score
+    - pattern: "^/api/admin"
+      base: 20
+    - pattern: "^/login"
+      base: 15
+
+  ws_concurrency_limits:
+    per_ip: 10
+    per_token: 10
+
+cluster:
+  enabled: true
+  bind_addr: "0.0.0.0:7946"
+
+  # SECURITY: Generate unique cluster secret for gossip encryption
+  # Command: openssl rand -base64 32
+  # All nodes in cluster MUST use the same secret
+  secret_key: "9Oe1WU4wl9ZxOGdniVMQdPBUxA4W1W13Pu1J0LXNy9U="  # REPLACE THIS
+
+  # Optional: Multi-node clustering (not yet implemented)
+  # advertise: "10.0.1.5:7946"
+  # seed_nodes:
+  #   - "10.0.1.10:7946"
+  #   - "10.0.1.11:7946"
+  # region: "us-west"
+
+threat_intel:
+  enabled: false
+  cache_capacity: 100000
+
+  # Optional: TAXII peer configuration
+  # peers:
+  #   - name: "peer-fastgate-dc2"
+  #     url: "https://dc2.example.com/taxii2"
+  #     collection_id: "fastgate"
+  #     username: "fastgate"
+  #     password: "secret"
+  #     poll_interval_sec: 60
+
+logging:
+  level: "info"  # Use "info" in production, "debug" for troubleshooting

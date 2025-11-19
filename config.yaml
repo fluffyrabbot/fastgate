@@ -1,14 +1,29 @@
+# ⚠️  DEVELOPMENT CONFIGURATION - DO NOT USE IN PRODUCTION
+# This configuration uses TEST KEYS that are publicly known.
+# For production deployment, use config.production.yaml as a template.
+#
+# To use this config for local development/testing:
+#   FASTGATE_ALLOW_TEST_KEYS=true ./fastgate
+#
+# To generate production secrets:
+#   openssl rand -base64 32
+
 version: v1
 server:
   listen: ":8080"
   read_timeout_ms: 5000
   write_timeout_ms: 5000
 
+  # DEVELOPMENT: No trusted proxies (unsafe, allows IP spoofing)
+  # Production: Configure your load balancer subnets
+  # trusted_proxies:
+  #   - "10.0.0.0/8"
+
 cookie:
   name: "Clearance"
   same_site: "Lax"
   max_age_sec: 3600
-  secure: false
+  secure: false  # DEVELOPMENT ONLY: Must be true in production
   http_only: true
 
 modes:
@@ -26,7 +41,7 @@ proxy:
   idle_timeout_ms: 90000
 
 challenge:
-  difficulty_bits: 12
+  difficulty_bits: 12  # Low difficulty for development (use 16+ in production)
   ttl_sec: 60
   max_retries: 3
   nonce_rps_limit: 5.0
@@ -43,6 +58,7 @@ webauthn:
 token:
   alg: "HS256"
   keys:
+    # ⚠️  TEST KEY - Publicly known, DO NOT use in production
     v1: "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg"
   current_kid: "v1"
   issuer: "fastgate"
@@ -57,6 +73,7 @@ policy:
 
 cluster:
   enabled: true
+  # ⚠️  TEST KEY - Publicly known, DO NOT use in production
   secret_key: "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg"
 
 logging:

@@ -275,20 +275,26 @@ func (c *Config) CookieMaxAge() time.Duration {
 
 func (c *Config) Validate() error {
 	// SECURITY: Reject known test keys to prevent production deployment with defaults
-	// TODO: Re-enable after fixing base64 handling in test environment
-	/*
+	// Can be bypassed with FASTGATE_ALLOW_TEST_KEYS=true for development/testing only
+	allowTestKeys := os.Getenv("FASTGATE_ALLOW_TEST_KEYS") == "true"
+
 	const testKey = "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg" // base64("thisisatestkeydonotuseinproduction")
 
-	if c.Cluster.SecretKey == testKey {
-		return errors.New("SECURITY: default test key detected in cluster.secret_key - generate a new secret for production")
-	}
-
-	for kid, key := range c.Token.Keys {
-		if key == testKey {
-			return fmt.Errorf("SECURITY: default test key detected in token.keys[%s] - generate a new secret for production", kid)
+	if !allowTestKeys {
+		if c.Cluster.SecretKey == testKey {
+			return errors.New("SECURITY: default test key detected in cluster.secret_key - generate a new secret for production (use 'openssl rand -base64 32')")
 		}
+
+		for kid, key := range c.Token.Keys {
+			if key == testKey {
+				return fmt.Errorf("SECURITY: default test key detected in token.keys[%s] - generate a new secret for production (use 'openssl rand -base64 32')", kid)
+			}
+		}
+	} else {
+		// Warn when running with test keys
+		fmt.Println("⚠️  WARNING: Running with FASTGATE_ALLOW_TEST_KEYS=true - test keys are ALLOWED")
+		fmt.Println("⚠️  This is UNSAFE for production. Only use for development/testing.")
 	}
-	*/
 
 	// Server timeout validation
 	if c.Server.ReadTimeoutMs <= 0 || c.Server.ReadTimeoutMs > 60000 {
