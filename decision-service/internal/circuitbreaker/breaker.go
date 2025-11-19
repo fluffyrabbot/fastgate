@@ -94,14 +94,15 @@ func New(name string, config Config) *CircuitBreaker {
 }
 
 // Allow checks if a request is allowed to proceed
-func (cb *CircuitBreaker) Allow() error {
+// Returns: error if request is rejected, needsRelease=true if caller must call Release() when done
+func (cb *CircuitBreaker) Allow() (needsRelease bool, err error) {
 	state := State(cb.state.Load())
 
 	switch state {
 	case StateClosed:
-		// Normal operation
+		// Normal operation - no release needed, we track totals not concurrency
 		cb.requests.Add(1)
-		return nil
+		return false, nil
 
 	case StateOpen:
 		// Check if timeout has elapsed
@@ -117,14 +118,14 @@ func (cb *CircuitBreaker) Allow() error {
 				cb.transitionTo(StateHalfOpen)
 				cb.mu.Unlock()
 				cb.requests.Add(1)
-				return nil
+				return true, nil // Caller MUST release this half-open probe
 			}
 			cb.mu.Unlock()
 		}
 
 		// Calculate time until retry
 		timeUntilRetry := cb.config.Timeout - elapsed
-		return fmt.Errorf("circuit breaker open for %s (retry in %v)", cb.name, timeUntilRetry.Round(time.Second))
+		return false, fmt.Errorf("circuit breaker open for %s (retry in %v)", cb.name, timeUntilRetry.Round(time.Second))
 
 	case StateHalfOpen:
 		// Allow limited requests to test backend health (prevent thundering herd)
@@ -132,14 +133,23 @@ func (cb *CircuitBreaker) Allow() error {
 		currentRequests := cb.requests.Add(1)
 		if int(currentRequests) > cb.config.SuccessThreshold {
 			cb.requests.Add(-1) // Rollback
-			return fmt.Errorf("circuit breaker half-open for %s: probe limit reached", cb.name)
+			return false, fmt.Errorf("circuit breaker half-open for %s: probe limit reached", cb.name)
 		}
 		// Record that we're allowing a probe request
 		metrics.ProxyCircuitHalfOpenProbes.WithLabelValues(cb.name).Inc()
-		return nil
+		return true, nil // Caller MUST release this half-open probe
 
 	default:
-		return fmt.Errorf("circuit breaker in unknown state")
+		return false, fmt.Errorf("circuit breaker in unknown state")
+	}
+}
+
+// Release decrements the request counter (for half-open concurrent request tracking)
+// Must be called in defer after Allow() returns needsRelease=true
+func (cb *CircuitBreaker) Release() {
+	// Only decrement if in half-open (concurrent tracking)
+	if State(cb.state.Load()) == StateHalfOpen {
+		cb.requests.Add(-1)
 	}
 }
 

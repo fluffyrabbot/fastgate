@@ -66,7 +66,7 @@ func TestCircuitOpens_AfterFailures(t *testing.T) {
 	}
 
 	// Circuit should now reject requests
-	if _, err := cb.Allow(); err == nil {
+	if err := cb.Allow(); err == nil {
 		t.Error("expected open circuit to reject requests")
 	}
 }

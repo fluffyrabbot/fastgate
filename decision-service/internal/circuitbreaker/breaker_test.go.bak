@@ -28,7 +28,7 @@ func TestAllow_ClosedState(t *testing.T) {
 	config := DefaultConfig()
 	cb := New("test-backend", config)
 
-	if _, err := cb.Allow(); err != nil {
+	if err := cb.Allow(); err != nil {
 		t.Errorf("expected closed circuit to allow request, got error: %v", err)
 	}
 
@@ -50,7 +50,7 @@ func TestCircuitOpens_AfterFailures(t *testing.T) {
 
 	// Generate enough requests to meet minimum threshold
 	for i := 0; i < 3; i++ {
-		if _, err := cb.Allow(); err != nil {
+		if err := cb.Allow(); err != nil {
 			t.Fatalf("unexpected error on request %d: %v", i, err)
 		}
 	}
@@ -66,7 +66,7 @@ func TestCircuitOpens_AfterFailures(t *testing.T) {
 	}
 
 	// Circuit should now reject requests
-	if _, err := cb.Allow(); err == nil {
+	if err := cb.Allow(); err == nil {
 		t.Error("expected open circuit to reject requests")
 	}
 }
@@ -119,7 +119,7 @@ func TestCircuitHalfOpen_AfterTimeout(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Next request should transition to half-open
-	if _, err := cb.Allow(); err != nil {
+	if err := cb.Allow(); err != nil {
 		t.Errorf("expected circuit to allow request after timeout, got error: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestCircuitCloses_AfterSuccesses(t *testing.T) {
 	}
 
 	// Should allow requests now
-	if _, err := cb.Allow(); err != nil {
+	if err := cb.Allow(); err != nil {
 		t.Errorf("closed circuit should allow requests, got error: %v", err)
 	}
 }

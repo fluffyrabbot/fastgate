@@ -226,9 +226,12 @@ func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCo
 // proxyToOrigin forwards the request to the upstream origin
 func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originURL string) {
 	// Check circuit breaker (if enabled)
+	var needsRelease bool
 	if h.cfg.Proxy.CircuitBreaker.Enabled {
 		cb := h.circuitBreakers.GetOrCreate(originURL)
-		if err := cb.Allow(); err != nil {
+		var err error
+		needsRelease, err = cb.Allow()
+		if err != nil {
 			logger := internalhttp.GetLogger(r.Context())
 			logger.Warn().
 				Str("origin", originURL).
@@ -237,6 +240,10 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 			metrics.ProxyCircuitOpen.WithLabelValues(originURL).Inc()
 			http.Error(w, "service temporarily unavailable", http.StatusServiceUnavailable)
 			return
+		}
+		// Release half-open probe slot when request completes
+		if needsRelease {
+			defer cb.Release()
 		}
 	}
 
