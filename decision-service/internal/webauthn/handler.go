@@ -32,10 +32,12 @@ func NewHandler(cfg *config.Config, kr *token.Keyring, rateLimiter *rate.Sliding
 		RPDisplayName: cfg.WebAuthn.RPName,
 		RPID:          cfg.WebAuthn.RPID,
 		RPOrigins:     cfg.WebAuthn.RPOrigins,
-		// Require a resident key (discoverable credential) for a passwordless-style ceremony.
+		// Request direct attestation to see hardware certificates
+		AttestationPreference: protocol.PreferDirectAttestation,
+		// Require platform authenticators (TPM, Touch ID, Windows Hello)
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			AuthenticatorAttachment: protocol.Platform,
-			RequireResidentKey:      protocol.ResidentKeyRequired(),
+			RequireResidentKey:      protocol.ResidentKeyNotRequired(),
 			UserVerification:        protocol.VerificationRequired,
 		},
 	}
@@ -57,10 +59,9 @@ func NewHandler(cfg *config.Config, kr *token.Keyring, rateLimiter *rate.Sliding
 	}, nil
 }
 
-// BeginLogin starts a WebAuthn authentication ceremony.
-// This is used for a "passwordless" flow where the user proves presence.
+// BeginRegistration starts a WebAuthn registration ceremony (credential creation).
 // POST /v1/challenge/webauthn
-func (h *Handler) BeginLogin(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -88,28 +89,24 @@ func (h *Handler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	req.ReturnURL = sanitizeReturnURL(req.ReturnURL)
 
-	// Create an ephemeral user for the ceremony. This prevents panics in the library.
+	// Create ephemeral user
 	user, err := NewEphemeralUser()
 	if err != nil {
-		log.Printf("webauthn: failed to create ephemeral user: %v", err)
+		log.Printf("webauthn: failed to create user: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
 	}
 
-	// Begin login ceremony
-	options, session, err := h.WebAuthn.BeginLogin(user)
-	// GRACEFUL HANDLING: The library returns an error if the user has no credentials.
-	// For our passwordless flow, this is expected and OK. We will ignore this specific
-	// error and proceed. Any other error is a real problem.
-	if err != nil && err.Error() != "Found no credentials for user" {
-		log.Printf("webauthn: begin login failed: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
-		return
-	}
+	// Begin registration
+	options, session, err := h.WebAuthn.BeginRegistration(user)
 	if err != nil {
-		log.Printf("webauthn: proceeding despite 'Found no credentials for user' error, which is expected for passwordless flow.")
+		log.Printf("webauthn: begin registration failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
 	}
 
+	log.Printf("webauthn: begin registration success - challenge=%s userID=%x rpID=%s origins=%v",
+		session.Challenge, user.ID, h.WebAuthn.Config.RPID, h.WebAuthn.Config.RPOrigins)
 
 	// Store session
 	challengeID := h.Store.Put(session, user.ID, req.ReturnURL)
@@ -120,22 +117,22 @@ func (h *Handler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := struct {
-		*protocol.CredentialAssertion
+		*protocol.CredentialCreation
 		ChallengeID string `json:"challenge_id"`
 		ReturnURL   string `json:"return_url"`
 	}{
-		CredentialAssertion: options,
-		ChallengeID:         challengeID,
-		ReturnURL:           req.ReturnURL,
+		CredentialCreation: options,
+		ChallengeID:        challengeID,
+		ReturnURL:          req.ReturnURL,
 	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
 
-// FinishLogin completes a WebAuthn authentication ceremony.
+// FinishRegistration completes a WebAuthn registration ceremony.
 // POST /v1/challenge/complete/webauthn
-func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -156,47 +153,65 @@ func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 
 	challengeID := r.URL.Query().Get("challenge_id")
 	if challengeID == "" || len(challengeID) > 256 {
+		log.Printf("webauthn: invalid challenge_id: %q", challengeID)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_challenge_id"})
 		return
 	}
 
-	parsedResponse, err := protocol.ParseCredentialRequestResponseBody(r.Body)
+	log.Printf("webauthn: finish registration - challengeID=%s", challengeID)
+
+	parsedResponse, err := protocol.ParseCredentialCreationResponseBody(r.Body)
 	if err != nil {
-		log.Printf("webauthn: failed to parse response: %v", err)
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_assertion"})
+		log.Printf("webauthn: failed to parse attestation response: %v", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_attestation"})
 		return
 	}
 
+	log.Printf("webauthn: parsed response - credID=%x type=%s", parsedResponse.Response.AttestationObject, parsedResponse.Type)
+
 	session, userID, returnURL, ok := h.Store.Get(challengeID)
 	if !ok {
+		log.Printf("webauthn: challenge not found in store: %s", challengeID)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "challenge_not_found"})
 		return
 	}
 	defer h.Store.Consume(challengeID)
 
-	// Recreate user from stored ID to pass to validation
+	log.Printf("webauthn: retrieved session - challenge=%s userID=%x", session.Challenge, userID)
+
+	// Recreate user from stored ID
 	user := &User{
 		ID:          userID,
 		Name:        "anonymous",
 		DisplayName: "Anonymous User",
 	}
 
-	// Validate the assertion
-	_, err = h.WebAuthn.ValidateLogin(user, *session, parsedResponse)
+	// Verify attestation
+	credential, err := h.WebAuthn.CreateCredential(user, *session, parsedResponse)
 	if err != nil {
-		log.Printf("webauthn: assertion validation failed: %v", err)
+		log.Printf("webauthn: attestation verification failed: %v (type=%T)", err, err)
 		metrics.WebAuthnAttestation.WithLabelValues("failed", "").Inc()
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "assertion_failed"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attestation_failed", "detail": err.Error()})
 		return
 	}
 
-	// The presence of an attestation object is not guaranteed in an authentication ceremony,
-	// but we can mark it as hardware-attested as the user has proven control of a key.
-	tier := "hardware_attested"
+	log.Printf("webauthn: credential created successfully - attType=%s id=%x", credential.AttestationType, credential.ID)
+
+	// Determine tier based on attestation format
+	tier := "attested"
+	if isHardwareBacked(credential.AttestationType) {
+		tier = "hardware_attested"
+	}
 	metrics.WebAuthnAttestation.WithLabelValues("success", tier).Inc()
+
+	log.Printf("webauthn: issuing token - tier=%s", tier)
 
 	// Issue clearance token
 	ttl := 24 * time.Hour
+	if tier == "attested" {
+		ttl = 12 * time.Hour
+	}
+
 	tokenStr, err := h.Keyring.Sign(tier, ttl)
 	if err != nil {
 		log.Printf("webauthn: failed to sign token: %v", err)
@@ -207,9 +222,12 @@ func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, httputil.BuildCookie(h.Config, tokenStr))
 
 	returnURL = sanitizeReturnURL(returnURL)
-	if returnURL == "" {
-		returnURL = "/"
+	if returnURL == "" || returnURL == "/" {
+		// Redirect to test success page if no specific return URL
+		returnURL = "/test/success"
 	}
+
+	log.Printf("webauthn: registration complete - redirecting to %s", returnURL)
 
 	w.Header().Set("Location", returnURL)
 	w.WriteHeader(http.StatusFound)

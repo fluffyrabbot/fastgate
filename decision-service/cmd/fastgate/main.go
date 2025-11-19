@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -229,6 +230,11 @@ func main() {
 		challengeFS := http.FileServer(http.Dir(challengePageDir))
 		mux.Handle(cfg.Proxy.ChallengePath+"/", http.StripPrefix(cfg.Proxy.ChallengePath, challengeFS))
 
+		// Test/Debug endpoint - shows authentication success without requiring origin
+		mux.Handle("/test/success", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleTestSuccess(w, r, cfg, kr)
+		}))
+
 		// Challenge endpoints (for PoW and WebAuthn challenges)
 		mux.Handle("/v1/challenge/nonce", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handleChallengeNonce(w, r, cfg, chIssuer, chNonceRPS)
@@ -239,8 +245,8 @@ func main() {
 
 		// WebAuthn endpoints (if enabled)
 		if webauthnHandler != nil {
-			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginLogin))
-			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishLogin))
+			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
+			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
 		}
 
 		// TAXII endpoints (if threat intel enabled)
@@ -300,12 +306,12 @@ func main() {
 			handleChallengeComplete(w, r, cfg, chIssuer, kr)
 		}))
 
-			// WebAuthn endpoints (if enabled)
-			if webauthnHandler != nil {
-				mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginLogin))
-				mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishLogin))
-				log.Info().Msg("WebAuthn endpoints registered")
-			}
+		// WebAuthn endpoints (if enabled)
+		if webauthnHandler != nil {
+			mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
+			mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
+			log.Info().Msg("WebAuthn endpoints registered")
+		}
 		// TAXII endpoints (if threat intel enabled)
 		if taxiiServer != nil {
 			mux.Handle("/taxii2/collections/", http.HandlerFunc(taxiiServer.HandleCollections))
@@ -736,6 +742,292 @@ func (r *responseRecorder) Write(b []byte) (int, error)       { return len(b), n
 func (r *responseRecorder) WriteHeader(statusCode int)        {}
 
 // handleHealth returns detailed component health status
+// handleTestSuccess shows authentication success page for testing without requiring origin
+func handleTestSuccess(w http.ResponseWriter, r *http.Request, cfg *config.Config, kr *token.Keyring) {
+	// Parse the clearance token if present
+	var tokenInfo struct {
+		Valid      bool
+		Tier       string
+		Expiry     string
+		Error      string
+		Present    bool
+	}
+
+	cookie, err := r.Cookie(cfg.Cookie.Name)
+	if err != nil {
+		tokenInfo.Present = false
+		tokenInfo.Error = "No clearance cookie found"
+	} else {
+		tokenInfo.Present = true
+		claims, _, err := kr.Verify(cookie.Value, 0) // 0 = no clock skew tolerance needed for display
+		if err != nil {
+			tokenInfo.Valid = false
+			tokenInfo.Error = err.Error()
+		} else {
+			tokenInfo.Valid = true
+			tokenInfo.Tier = claims.Tier
+			tokenInfo.Expiry = claims.ExpiresAt.Time.Format("2006-01-02 15:04:05 MST")
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	// Build status indicators
+	statusIcon := "✅"
+	statusText := "Authenticated"
+	statusClass := "success"
+	if !tokenInfo.Valid {
+		statusIcon = "⚠️"
+		statusText = "Invalid/Missing Token"
+		statusClass = "warning"
+	}
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+	<title>FastGate Test Success</title>
+	<meta charset="utf-8">
+	<style>
+		* { margin: 0; padding: 0; box-sizing: border-box; }
+		body {
+			font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+			background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+			min-height: 100vh;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 20px;
+		}
+		.container {
+			background: white;
+			border-radius: 16px;
+			box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+			max-width: 800px;
+			width: 100%%;
+			padding: 40px;
+		}
+		.header {
+			text-align: center;
+			margin-bottom: 40px;
+		}
+		.status-icon {
+			font-size: 64px;
+			margin-bottom: 16px;
+		}
+		h1 {
+			color: #1a202c;
+			font-size: 32px;
+			margin-bottom: 8px;
+		}
+		.subtitle {
+			color: #718096;
+			font-size: 16px;
+		}
+		.info-box {
+			background: #f7fafc;
+			border-left: 4px solid #4299e1;
+			padding: 20px;
+			margin: 24px 0;
+			border-radius: 4px;
+		}
+		.info-box.success {
+			border-left-color: #48bb78;
+			background: #f0fff4;
+		}
+		.info-box.warning {
+			border-left-color: #ed8936;
+			background: #fffaf0;
+		}
+		.info-row {
+			display: flex;
+			padding: 12px 0;
+			border-bottom: 1px solid #e2e8f0;
+		}
+		.info-row:last-child {
+			border-bottom: none;
+		}
+		.info-label {
+			font-weight: 600;
+			color: #2d3748;
+			min-width: 180px;
+		}
+		.info-value {
+			color: #4a5568;
+			font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+			word-break: break-all;
+		}
+		.token-tier {
+			display: inline-block;
+			padding: 4px 12px;
+			border-radius: 12px;
+			font-size: 12px;
+			font-weight: 600;
+			text-transform: uppercase;
+			background: #9f7aea;
+			color: white;
+		}
+		.explanation {
+			background: #edf2f7;
+			padding: 24px;
+			border-radius: 8px;
+			margin: 24px 0;
+		}
+		.explanation h2 {
+			color: #2d3748;
+			font-size: 18px;
+			margin-bottom: 16px;
+		}
+		.explanation p {
+			color: #4a5568;
+			line-height: 1.6;
+			margin-bottom: 12px;
+		}
+		.flow-list {
+			list-style: none;
+			counter-reset: step;
+		}
+		.flow-list li {
+			counter-increment: step;
+			padding: 12px 0;
+			color: #4a5568;
+			position: relative;
+			padding-left: 40px;
+		}
+		.flow-list li::before {
+			content: counter(step);
+			position: absolute;
+			left: 0;
+			top: 10px;
+			width: 28px;
+			height: 28px;
+			background: #667eea;
+			color: white;
+			border-radius: 50%%;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-weight: 600;
+			font-size: 14px;
+		}
+		.note {
+			background: #fff5f5;
+			border: 1px solid #feb2b2;
+			padding: 16px;
+			border-radius: 8px;
+			margin-top: 24px;
+		}
+		.note strong {
+			color: #c53030;
+		}
+		.note p {
+			color: #742a2a;
+			margin-top: 8px;
+			line-height: 1.5;
+		}
+		code {
+			background: #1a202c;
+			color: #68d391;
+			padding: 2px 6px;
+			border-radius: 3px;
+			font-size: 13px;
+		}
+		.links {
+			margin-top: 32px;
+			padding-top: 24px;
+			border-top: 2px solid #e2e8f0;
+			text-align: center;
+		}
+		.links a {
+			color: #667eea;
+			text-decoration: none;
+			margin: 0 16px;
+			font-weight: 500;
+		}
+		.links a:hover {
+			text-decoration: underline;
+		}
+	</style>
+</head>
+<body>
+	<div class="container">
+		<div class="header">
+			<div class="status-icon">%s</div>
+			<h1>%s</h1>
+			<p class="subtitle">FastGate Authentication Test Page</p>
+		</div>
+
+		<div class="info-box %s">
+			<div class="info-row">
+				<span class="info-label">Cookie Present:</span>
+				<span class="info-value">%v</span>
+			</div>
+			<div class="info-row">
+				<span class="info-label">Token Valid:</span>
+				<span class="info-value">%v</span>
+			</div>`,
+		statusIcon, statusText, statusClass,
+		tokenInfo.Present, tokenInfo.Valid)
+
+	if tokenInfo.Valid {
+		html += fmt.Sprintf(`
+			<div class="info-row">
+				<span class="info-label">Token Tier:</span>
+				<span class="info-value"><span class="token-tier">%s</span></span>
+			</div>
+			<div class="info-row">
+				<span class="info-label">Expires:</span>
+				<span class="info-value">%s</span>
+			</div>`, tokenInfo.Tier, tokenInfo.Expiry)
+	}
+
+	if tokenInfo.Error != "" {
+		html += fmt.Sprintf(`
+			<div class="info-row">
+				<span class="info-label">Error:</span>
+				<span class="info-value">%s</span>
+			</div>`, tokenInfo.Error)
+	}
+
+	html += `
+		</div>
+
+		<div class="explanation">
+			<h2>What Just Happened:</h2>
+			<ol class="flow-list">
+				<li>Your request was intercepted by FastGate</li>
+				<li>You were redirected to the challenge page (<code>/__uam</code>)</li>
+				<li>WebAuthn registration flow executed with your platform authenticator</li>
+				<li>FastGate verified your attestation and issued a clearance token</li>
+				<li>You were redirected here with the authenticated session</li>
+			</ol>
+		</div>
+
+		<div class="note">
+			<strong>⚙️ Development Mode Notice</strong>
+			<p>
+				This test endpoint exists to verify authentication without requiring a production origin server.
+				Once you configure your production origin (in <code>config.yaml</code> under <code>proxy.origin</code>),
+				authenticated requests will be proxied to your backend application instead of showing this page.
+			</p>
+			<p style="margin-top: 12px;">
+				In production, users would see your actual application content here, not this test page.
+				This endpoint is useful for development, debugging, and CI/CD testing.
+			</p>
+		</div>
+
+		<div class="links">
+			<a href="/">← Try Root Path</a>
+			<a href="/test/success">Refresh This Page</a>
+			<a href="/metrics">View Metrics →</a>
+		</div>
+	</div>
+</body>
+</html>`
+
+	w.Write([]byte(html))
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request, ph *proxy.Handler, is *intel.Store, wh *webauthn.Handler) {
 	type HealthStatus struct {
 		Status     string            `json:"status"` // "ok" | "degraded"
