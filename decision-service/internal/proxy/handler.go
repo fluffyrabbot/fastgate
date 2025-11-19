@@ -22,9 +22,8 @@ import (
 )
 
 const (
-	maxProxyCacheSize = 100                 // Maximum number of cached reverse proxies
-	maxProxyBodySize  = 100 * 1024 * 1024   // 100MB max for proxied request bodies
-	proxyCacheTTL     = 5 * time.Minute     // TTL for cached proxies (DNS change handling)
+	maxProxyCacheSize = 100             // Maximum number of cached reverse proxies
+	proxyCacheTTL     = 5 * time.Minute // TTL for cached proxies (DNS change handling)
 )
 
 var (
@@ -224,7 +223,8 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 	}
 
 	// Limit request body size to prevent memory exhaustion
-	r.Body = http.MaxBytesReader(w, r.Body, maxProxyBodySize)
+	maxBodySize := int64(h.cfg.Proxy.MaxBodySizeMB) * 1024 * 1024
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 
 	// Clean up auth-request headers before proxying
 	r.Header.Del("X-Original-Method")

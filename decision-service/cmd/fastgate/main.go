@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,15 +30,20 @@ import (
 )
 
 const (
-	maxJSONBytes                 = 4 * 1024  // 4KB body cap for challenge/nonce endpoint
-	maxEntropyBytes              = 16 * 1024 // 16KB for challenge/complete with entropy data
-	maxChallengeStartsRPSPerIP   = 3.0       // soft guard: ~3 req/sec per IP over 10s window
-	challengeRetryAfterSeconds   = 2        // hint for clients when 429 is returned
-	defaultChallengeStoreCap     = 100_000 // (used implicitly by Store's default)
+	maxJSONBytes    = 4 * 1024  // 4KB body cap for challenge/nonce endpoint
+	maxEntropyBytes = 16 * 1024 // 16KB for challenge/complete with entropy data
 )
 
 func main() {
-	cfgPath := os.Getenv("FASTGATE_CONFIG")
+	// CLI flag support for config path
+	configFlag := flag.String("config", "", "path to config file (overrides FASTGATE_CONFIG env var)")
+	flag.Parse()
+
+	// Determine config path: CLI flag > env var > default
+	cfgPath := *configFlag
+	if cfgPath == "" {
+		cfgPath = os.Getenv("FASTGATE_CONFIG")
+	}
 	if cfgPath == "" {
 		// Try config.yaml first, fall back to config.example.yaml
 		cfgPath = "./config.yaml"
@@ -264,9 +270,9 @@ func main() {
 		// Per-IP RPS guard
 		ip := clientIPFromHeaders(r)
 		if ip != "" {
-			if rps := chNonceRPS.Add("nonce:" + ip); rps > maxChallengeStartsRPSPerIP {
+			if rps := chNonceRPS.Add("nonce:" + ip); rps > cfg.Challenge.NonceRPSLimit {
 				metrics.RateLimitHits.WithLabelValues("challenge_nonce").Inc()
-				w.Header().Set("Retry-After", strconv.Itoa(challengeRetryAfterSeconds))
+				w.Header().Set("Retry-After", strconv.Itoa(cfg.Challenge.RetryAfterSec))
 				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 				return
 			}
@@ -466,8 +472,8 @@ func main() {
 	go func() {
 		log.Info().
 			Str("listen", cfg.Server.Listen).
-			Int("challenge_cap", defaultChallengeStoreCap).
-			Float64("rps_guard", maxChallengeStartsRPSPerIP).
+			Int("challenge_cap", cfg.Challenge.StoreCapacity).
+			Float64("rps_guard", cfg.Challenge.NonceRPSLimit).
 			Msg("FastGate Decision Service listening")
 		if cfg.Server.TLSEnabled {
 			log.Info().
@@ -547,9 +553,9 @@ func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Co
 	// Per-IP RPS guard
 	ip := clientIPFromHeaders(r)
 	if ip != "" {
-		if rps := chNonceRPS.Add("nonce:" + ip); rps > maxChallengeStartsRPSPerIP {
+		if rps := chNonceRPS.Add("nonce:" + ip); rps > cfg.Challenge.NonceRPSLimit {
 			metrics.RateLimitHits.WithLabelValues("challenge_nonce").Inc()
-			w.Header().Set("Retry-After", strconv.Itoa(challengeRetryAfterSeconds))
+			w.Header().Set("Retry-After", strconv.Itoa(cfg.Challenge.RetryAfterSec))
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 			return
 		}

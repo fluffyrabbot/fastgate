@@ -63,9 +63,12 @@ type PolicyCfg struct {
 }
 
 type ChallengeCfg struct {
-	DifficultyBits int `yaml:"difficulty_bits"`
-	TTLSec         int `yaml:"ttl_sec"`
-	MaxRetries     int `yaml:"max_retries"`
+	DifficultyBits int     `yaml:"difficulty_bits"`
+	TTLSec         int     `yaml:"ttl_sec"`
+	MaxRetries     int     `yaml:"max_retries"`
+	StoreCapacity  int     `yaml:"store_capacity"`    // Challenge store LRU capacity (default: 100000)
+	NonceRPSLimit  float64 `yaml:"nonce_rps_limit"`   // Per-IP RPS limit for /challenge/nonce (default: 3.0)
+	RetryAfterSec  int     `yaml:"retry_after_sec"`   // Retry-After header value when rate limited (default: 2)
 }
 
 type LoggingCfg struct {
@@ -118,6 +121,7 @@ type ProxyCfg struct {
 	MaxIdleConns         int          `yaml:"max_idle_conns"`          // Max idle connections across all hosts (default: 100)
 	MaxIdleConnsPerHost  int          `yaml:"max_idle_conns_per_host"` // Max idle connections per host (default: 20)
 	MaxConnsPerHost      int          `yaml:"max_conns_per_host"`      // Max connections per host (default: 100)
+	MaxBodySizeMB        int          `yaml:"max_body_size_mb"`        // Max request body size in MB (default: 100)
 }
 
 type Config struct {
@@ -191,6 +195,16 @@ func Load(path string) (*Config, error) {
 	if cfg.WebAuthn.TTLSec == 0 {
 		cfg.WebAuthn.TTLSec = 60
 	}
+	// Challenge defaults
+	if cfg.Challenge.StoreCapacity == 0 {
+		cfg.Challenge.StoreCapacity = 100000 // 100k challenges
+	}
+	if cfg.Challenge.NonceRPSLimit == 0 {
+		cfg.Challenge.NonceRPSLimit = 3.0 // 3 req/sec per IP
+	}
+	if cfg.Challenge.RetryAfterSec == 0 {
+		cfg.Challenge.RetryAfterSec = 2 // 2 seconds
+	}
 	// Proxy defaults
 	if cfg.Proxy.Mode == "" {
 		cfg.Proxy.Mode = "integrated"
@@ -212,6 +226,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Proxy.MaxConnsPerHost == 0 {
 		cfg.Proxy.MaxConnsPerHost = 100
+	}
+	if cfg.Proxy.MaxBodySizeMB == 0 {
+		cfg.Proxy.MaxBodySizeMB = 100 // 100MB
 	}
 	// Compile route path patterns
 	for i := range cfg.Proxy.Routes {

@@ -47,6 +47,9 @@ challenge:
   difficulty_bits: 16  # keep small for dev; raise in prod (e.g., 18-20)
   ttl_sec: 60
   max_retries: 2
+  store_capacity: 100000  # Challenge store LRU capacity (default: 100000)
+  nonce_rps_limit: 3.0    # Per-IP RPS limit for /challenge/nonce (default: 3.0)
+  retry_after_sec: 2      # Retry-After header value when rate limited (default: 2)
 
 logging:
   level: "info"
@@ -113,3 +116,4 @@ proxy:
   max_idle_conns: 100           # Max idle connections across all hosts (default: 100)
   max_idle_conns_per_host: 20   # Max idle connections per host (default: 20)
   max_conns_per_host: 100       # Max connections per host (default: 100, increase for high traffic)
+  max_body_size_mb: 100         # Max request body size in MB (default: 100, increase for file uploads)
