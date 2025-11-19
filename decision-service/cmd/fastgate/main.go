@@ -263,10 +263,11 @@ func main() {
 			handleReadiness(w, r, proxyHandler, intelStore, webauthnHandler, cfg)
 		}))
 		metrics.MustRegister()
-		mux.Handle("/metrics", promhttp.Handler())
-		
-		// Admin stats endpoint for dashboard
-		mux.Handle("/admin/stats", http.HandlerFunc(handleAdminStats))
+		// Metrics endpoint - requires valid clearance token for security
+		mux.Handle("/metrics", requireAuth(kr, cfg, promhttp.Handler()))
+
+		// Admin stats endpoint for dashboard - requires valid clearance token
+		mux.Handle("/admin/stats", requireAuth(kr, cfg, http.HandlerFunc(handleAdminStats)))
 
 		// Proxy handler for all other requests
 		mux.Handle("/", proxyHandler)
@@ -327,10 +328,11 @@ func main() {
 			handleReadiness(w, r, nil, intelStore, webauthnHandler, cfg)
 		}))
 		metrics.MustRegister()
-		mux.Handle("/metrics", promhttp.Handler())
+		// Metrics endpoint - requires valid clearance token for security
+		mux.Handle("/metrics", requireAuth(kr, cfg, promhttp.Handler()))
 
-		// Admin stats endpoint for dashboard
-		mux.Handle("/admin/stats", http.HandlerFunc(handleAdminStats))
+		// Admin stats endpoint for dashboard - requires valid clearance token
+		mux.Handle("/admin/stats", requireAuth(kr, cfg, http.HandlerFunc(handleAdminStats)))
 
 		// Apply middleware chain: request ID (with trusted proxies) → common headers
 		handler = Chain(
@@ -763,6 +765,45 @@ func Chain(middlewares ...Middleware) Middleware {
 		}
 		return final
 	}
+}
+
+// requireAuth wraps an http.Handler and requires a valid clearance token
+// This is used to protect sensitive endpoints like /metrics and /admin/stats
+func requireAuth(kr *token.Keyring, cfg *config.Config, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logger := httputil.GetLogger(r.Context())
+
+		// Check for clearance cookie
+		cookie, err := r.Cookie(cfg.Cookie.Name)
+		if err != nil {
+			logger.Warn().
+				Str("path", r.URL.Path).
+				Str("client_ip", clientIPFromHeaders(r)).
+				Msg("metrics/admin endpoint accessed without authentication")
+			http.Error(w, "Authentication required", http.StatusUnauthorized)
+			return
+		}
+
+		// Verify token (no minimum time left required for admin endpoints)
+		claims, _, err := kr.Verify(cookie.Value, 0)
+		if err != nil {
+			logger.Warn().
+				Str("path", r.URL.Path).
+				Str("client_ip", clientIPFromHeaders(r)).
+				Err(err).
+				Msg("metrics/admin endpoint accessed with invalid token")
+			http.Error(w, "Invalid authentication", http.StatusUnauthorized)
+			return
+		}
+
+		// Log successful access for audit trail
+		logger.Debug().
+			Str("path", r.URL.Path).
+			Str("tier", claims.Tier).
+			Msg("authenticated access to admin/metrics endpoint")
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func withCommonHeaders(next http.Handler) http.Handler {

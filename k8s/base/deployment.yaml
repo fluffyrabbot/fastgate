@@ -28,7 +28,7 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
-      # Security: Run as non-root user
+      # Security: Run as non-root user with strict security controls
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -36,6 +36,8 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+        # Prevent privilege escalation
+        allowPrivilegeEscalation: false
 
       # High-priority pods for critical gateway workload
       priorityClassName: system-cluster-critical
@@ -89,10 +91,12 @@ spec:
           image: fastgate:latest
           imagePullPolicy: IfNotPresent
 
-          # Security context
+          # Container security context - maximum hardening
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
             capabilities:
               drop:
                 - ALL
