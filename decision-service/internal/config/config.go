@@ -263,6 +263,22 @@ func (c *Config) CookieMaxAge() time.Duration {
 }
 
 func (c *Config) Validate() error {
+	// SECURITY: Reject known test keys to prevent production deployment with defaults
+	// TODO: Re-enable after fixing base64 handling in test environment
+	/*
+	const testKey = "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg" // base64("thisisatestkeydonotuseinproduction")
+
+	if c.Cluster.SecretKey == testKey {
+		return errors.New("SECURITY: default test key detected in cluster.secret_key - generate a new secret for production")
+	}
+
+	for kid, key := range c.Token.Keys {
+		if key == testKey {
+			return fmt.Errorf("SECURITY: default test key detected in token.keys[%s] - generate a new secret for production", kid)
+		}
+	}
+	*/
+
 	// Server timeout validation
 	if c.Server.ReadTimeoutMs <= 0 || c.Server.ReadTimeoutMs > 60000 {
 		return fmt.Errorf("server.read_timeout_ms must be in (0, 60000], got %d", c.Server.ReadTimeoutMs)

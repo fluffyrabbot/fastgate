@@ -1,0 +1,63 @@
+version: v1
+server:
+  listen: ":8080"
+  read_timeout_ms: 5000
+  write_timeout_ms: 5000
+
+cookie:
+  name: "Clearance"
+  same_site: "Lax"
+  max_age_sec: 3600
+  secure: false
+  http_only: true
+
+modes:
+  enforce: true
+  fail_open: false
+  under_attack: false
+
+proxy:
+  enabled: true
+  mode: "integrated"
+  origin: "http://localhost:3000"
+  
+  challenge_path: "/__uam"
+  timeout_ms: 30000
+  idle_timeout_ms: 90000
+
+challenge:
+  difficulty_bits: 12
+  ttl_sec: 60
+  max_retries: 3
+  nonce_rps_limit: 5.0
+  retry_after_sec: 2
+
+webauthn:
+  enabled: true
+  rp_id: "localhost"
+  rp_name: "MeSH System Access"
+  rp_origins: 
+    - "http://localhost:8080"
+  ttl_sec: 60
+
+token:
+  alg: "HS256"
+  keys:
+    v1: "n2QPMu8s62OVTZyIPnuHs6kA3sQgO1DWywx0kLfpqDA="
+  current_kid: "v1"
+  issuer: "fastgate"
+
+policy:
+  challenge_threshold: 0  
+  block_threshold: 100
+  paths: []
+  ws_concurrency_limits:
+    per_ip: 10
+    per_token: 10
+
+cluster:
+  enabled: true
+  secret_key: "n2QPMu8s62OVTZyIPnuHs6kA3sQgO1DWywx0kLfpqDA="
+
+logging:
+  level: "debug"
