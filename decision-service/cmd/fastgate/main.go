@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +24,8 @@ import (
 	"fastgate/decision-service/internal/webauthn"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -41,20 +42,39 @@ func main() {
 		// Try config.yaml first, fall back to config.example.yaml
 		cfgPath = "./config.yaml"
 		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-			log.Printf("No config file found at %s, using config.example.yaml", cfgPath)
+			// Can't use log yet, it's not configured
 			cfgPath = "./config.example.yaml"
 		}
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		log.Fatal().Err(err).Msg("failed to load config")
 	}
 	if err := cfg.Validate(); err != nil {
-		log.Fatalf("invalid config: %v", err)
+		log.Fatal().Err(err).Msg("invalid config")
 	}
+
+	// Setup structured logging
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	if cfg.Logging.Level == "debug" {
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+		log.Logger = log.Logger.Output(zerolog.ConsoleWriter{Out: os.Stdout})
+	} else {
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		// JSON logging for production
+	}
+
+	log.Info().
+		Str("config_path", cfgPath).
+		Str("log_level", cfg.Logging.Level).
+		Bool("enforce", cfg.Modes.Enforce).
+		Bool("proxy_enabled", cfg.Proxy.Enabled).
+		Str("proxy_mode", cfg.Proxy.Mode).
+		Msg("FastGate starting")
+
 	kr, err := token.NewKeyring(cfg.Token.Alg, cfg.Token.Keys, cfg.Token.CurrentKID, cfg.Token.Issuer, cfg.Token.SkewSec)
 	if err != nil {
-		log.Fatalf("keyring: %v", err)
+		log.Fatal().Err(err).Msg("failed to create keyring")
 	}
 	authzHandler := authz.NewHandler(cfg, kr)
 
@@ -70,10 +90,13 @@ func main() {
 	if cfg.WebAuthn.Enabled {
 		wh, err := webauthn.NewHandler(cfg, kr, chNonceRPS)
 		if err != nil {
-			log.Fatalf("webauthn handler: %v", err)
+			log.Fatal().Err(err).Msg("failed to create webauthn handler")
 		}
 		webauthnHandler = wh
-		log.Printf("WebAuthn enabled (RP ID: %s, Origins: %v)", cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigins)
+		log.Info().
+			Str("rp_id", cfg.WebAuthn.RPID).
+			Strs("rp_origins", cfg.WebAuthn.RPOrigins).
+			Msg("WebAuthn enabled")
 	}
 
 	// Threat Intelligence (if enabled)
@@ -97,14 +120,20 @@ func main() {
 			poller := intel.NewPoller(client, intelStore, peer.CollectionID, pollInterval)
 			pollers = append(pollers, poller)
 			go poller.Start()
-			log.Printf("Threat intel: polling %s every %v", peer.Name, pollInterval)
+			log.Info().
+				Str("peer_name", peer.Name).
+				Dur("poll_interval", pollInterval).
+				Msg("threat intel poller started")
 		}
 
 		// Inject into authz handler
 		authzHandler.IntelStore = intelStore
 		authzHandler.TAXIIServer = taxiiServer
 
-		log.Printf("Threat intel enabled (peers: %d, cache: %d)", len(cfg.ThreatIntel.Peers), cfg.ThreatIntel.CacheCapacity)
+		log.Info().
+			Int("peers", len(cfg.ThreatIntel.Peers)).
+			Int("cache_capacity", cfg.ThreatIntel.CacheCapacity).
+			Msg("threat intel enabled")
 	}
 
 	// Check if we're using integrated proxy mode
@@ -112,7 +141,7 @@ func main() {
 	var proxyHandler *proxy.Handler // Store reference for shutdown
 	if cfg.Proxy.Enabled && cfg.Proxy.Mode == "integrated" {
 		// Integrated proxy mode: all requests go through proxy handler
-		log.Printf("Starting in integrated proxy mode")
+		log.Info().Msg("starting in integrated proxy mode")
 
 		// Determine challenge page directory
 		challengePageDir := os.Getenv("CHALLENGE_PAGE_DIR")
@@ -123,26 +152,32 @@ func main() {
 		// Create integrated proxy handler
 		ph, err := proxy.NewHandler(cfg, authzHandler, challengePageDir)
 		if err != nil {
-			log.Fatalf("proxy handler: %v", err)
+			log.Fatal().Err(err).Msg("failed to create proxy handler")
 		}
 		proxyHandler = ph
 
 		// Log proxy routing configuration
-		log.Printf("Proxy routing configuration:")
+		log.Info().Msg("proxy routing configuration:")
 		if cfg.Proxy.Origin != "" {
-			log.Printf("  - Mode: single-origin → %s", cfg.Proxy.Origin)
+			log.Info().Str("origin", cfg.Proxy.Origin).Msg("  mode: single-origin")
 		} else {
-			log.Printf("  - Mode: multi-origin (%d routes)", len(cfg.Proxy.Routes))
+			log.Info().Int("route_count", len(cfg.Proxy.Routes)).Msg("  mode: multi-origin")
 			for i, route := range cfg.Proxy.Routes {
 				if route.Host != "" {
-					log.Printf("    %d. host=%s → %s", i+1, route.Host, route.Origin)
+					log.Info().Int("index", i+1).Str("host", route.Host).Str("origin", route.Origin).Msg("    route")
 				} else if route.Path != "" {
-					log.Printf("    %d. path=%s → %s", i+1, route.Path, route.Origin)
+					log.Info().Int("index", i+1).Str("path", route.Path).Str("origin", route.Origin).Msg("    route")
 				}
 			}
 		}
-		log.Printf("  - Challenge path: %s (serving from %s)", cfg.Proxy.ChallengePath, challengePageDir)
-		log.Printf("  - Timeouts: proxy=%dms, idle=%dms", cfg.Proxy.TimeoutMs, cfg.Proxy.IdleTimeoutMs)
+		log.Info().
+			Str("challenge_path", cfg.Proxy.ChallengePath).
+			Str("challenge_dir", challengePageDir).
+			Msg("  challenge configuration")
+		log.Info().
+			Int("proxy_timeout_ms", cfg.Proxy.TimeoutMs).
+			Int("idle_timeout_ms", cfg.Proxy.IdleTimeoutMs).
+			Msg("  timeouts")
 
 		// Create mux for API endpoints and proxy
 		mux := http.NewServeMux()
@@ -180,12 +215,14 @@ func main() {
 		// Proxy handler for all other requests
 		mux.Handle("/", proxyHandler)
 
-		// Apply middleware chain (add more middlewares as needed)
-		// Example: handler = Chain(withLogging, withMetrics, withCommonHeaders)(mux)
-		handler = Chain(withCommonHeaders)(mux)
+		// Apply middleware chain: request ID → common headers
+		handler = Chain(
+			httputil.RequestIDMiddleware(log.Logger),
+			withCommonHeaders,
+		)(mux)
 	} else {
 		// NGINX mode: traditional auth_request endpoint mode
-		log.Printf("Starting in NGINX mode (auth_request)")
+		log.Info().Msg("starting in NGINX mode (auth_request)")
 		mux := http.NewServeMux()
 
 		// /v1/authz — called via NGINX auth_request
@@ -299,7 +336,11 @@ func main() {
 			// Debug logging for challenge validation failures
 			if cfg.Logging.Level == "debug" {
 				clientIP := clientIPFromHeaders(r)
-				log.Printf("Challenge validation failed: reason=%s id=%s ip=%s", reason, req.ChallengeID, clientIP)
+				log.Debug().
+					Str("reason", reason).
+					Str("challenge_id", req.ChallengeID).
+					Str("client_ip", clientIP).
+					Msg("challenge validation failed")
 			}
 
 			switch reason {
@@ -327,8 +368,12 @@ func main() {
 			assessment := analyzer.Analyze(req.Entropy)
 
 			if cfg.Logging.Level == "debug" {
-				log.Printf("Entropy assessment: bot=%.2f confidence=%.2f suspicious=%v reasons=%v",
-					assessment.BotScore, assessment.Confidence, assessment.IsSuspicious, assessment.Reasons)
+				log.Debug().
+					Float64("bot_score", assessment.BotScore).
+					Float64("confidence", assessment.Confidence).
+					Bool("suspicious", assessment.IsSuspicious).
+					Interface("reasons", assessment.Reasons).
+					Msg("entropy assessment")
 			}
 
 			// Upgrade tier if low bot score and high confidence
@@ -340,7 +385,10 @@ func main() {
 			if assessment.IsBot {
 				tier = "low" // Keep low tier for bot-like behavior
 				if cfg.Logging.Level == "debug" {
-					log.Printf("Bot detected (score=%.2f): %v", assessment.BotScore, assessment.Reasons)
+					log.Debug().
+						Float64("bot_score", assessment.BotScore).
+						Interface("reasons", assessment.Reasons).
+						Msg("bot detected")
 				}
 			}
 		}
@@ -354,7 +402,7 @@ func main() {
 		metrics.ChallengeSolved.Inc()
 
 		if cfg.Logging.Level == "debug" {
-			log.Printf("Clearance issued: tier=%s", tier)
+			log.Debug().Str("tier", tier).Msg("clearance issued")
 		}
 
 		if retURL == "" {
@@ -368,14 +416,14 @@ func main() {
 	if webauthnHandler != nil {
 		mux.Handle("/v1/challenge/webauthn", http.HandlerFunc(webauthnHandler.BeginRegistration))
 		mux.Handle("/v1/challenge/complete/webauthn", http.HandlerFunc(webauthnHandler.FinishRegistration))
-		log.Printf("WebAuthn endpoints registered: /v1/challenge/webauthn, /v1/challenge/complete/webauthn")
+		log.Info().Msg("WebAuthn endpoints registered")
 	}
 
 	// TAXII endpoints (if threat intel enabled)
 	if taxiiServer != nil {
 		mux.Handle("/taxii2/collections/", http.HandlerFunc(taxiiServer.HandleCollections))
 		mux.Handle("/taxii2/collections/fastgate/objects/", http.HandlerFunc(taxiiServer.HandleObjects))
-		log.Printf("TAXII endpoints registered: /taxii2/collections/, /taxii2/collections/fastgate/objects/")
+		log.Info().Msg("TAXII endpoints registered")
 	}
 
 	// health & metrics
@@ -388,13 +436,22 @@ func main() {
 		metrics.MustRegister()
 		mux.Handle("/metrics", promhttp.Handler())
 
-		// Apply middleware chain
-		handler = Chain(withCommonHeaders)(mux)
+		// Apply middleware chain: request ID → common headers
+		handler = Chain(
+			httputil.RequestIDMiddleware(log.Logger),
+			withCommonHeaders,
+		)(mux)
 	}
 
 	// Log feature state summary
-	log.Printf("Feature configuration: enforce=%v fail_open=%v under_attack=%v webauthn=%v threat_intel=%v proxy_mode=%s",
-		cfg.Modes.Enforce, cfg.Modes.FailOpen, cfg.Modes.UnderAttack, cfg.WebAuthn.Enabled, cfg.ThreatIntel.Enabled, cfg.Proxy.Mode)
+	log.Info().
+		Bool("enforce", cfg.Modes.Enforce).
+		Bool("fail_open", cfg.Modes.FailOpen).
+		Bool("under_attack", cfg.Modes.UnderAttack).
+		Bool("webauthn", cfg.WebAuthn.Enabled).
+		Bool("threat_intel", cfg.ThreatIntel.Enabled).
+		Str("proxy_mode", cfg.Proxy.Mode).
+		Msg("feature configuration")
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
@@ -407,12 +464,19 @@ func main() {
 	// Graceful shutdown setup
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("FastGate Decision Service listening on %s (challenge cap ~%dk, RPS guard %.1f/s per IP)", cfg.Server.Listen, defaultChallengeStoreCap/1000, maxChallengeStartsRPSPerIP)
+		log.Info().
+			Str("listen", cfg.Server.Listen).
+			Int("challenge_cap", defaultChallengeStoreCap).
+			Float64("rps_guard", maxChallengeStartsRPSPerIP).
+			Msg("FastGate Decision Service listening")
 		if cfg.Server.TLSEnabled {
-			log.Printf("Starting with TLS (cert: %s, key: %s)", cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+			log.Info().
+				Str("cert", cfg.Server.TLSCertFile).
+				Str("key", cfg.Server.TLSKeyFile).
+				Msg("starting with TLS")
 			serverErrors <- srv.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 		} else {
-			log.Printf("Starting without TLS (WARNING: use TLS in production)")
+			log.Warn().Msg("starting without TLS (WARNING: use TLS in production)")
 			serverErrors <- srv.ListenAndServe()
 		}
 	}()
@@ -423,9 +487,9 @@ func main() {
 
 	select {
 	case err := <-serverErrors:
-		log.Fatalf("Server error: %v", err)
+		log.Fatal().Err(err).Msg("server error")
 	case sig := <-shutdown:
-		log.Printf("Received shutdown signal: %v", sig)
+		log.Info().Str("signal", sig.String()).Msg("received shutdown signal")
 
 		// Create shutdown context with 30s timeout
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -444,17 +508,17 @@ func main() {
 		// Shutdown proxy handler (if in integrated mode)
 		if proxyHandler != nil {
 			if err := proxyHandler.Shutdown(ctx); err != nil {
-				log.Printf("Proxy shutdown error: %v", err)
+				log.Error().Err(err).Msg("proxy shutdown error")
 			}
 		}
 
 		// Gracefully shutdown HTTP server
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Printf("Graceful shutdown failed, forcing: %v", err)
+			log.Warn().Err(err).Msg("graceful shutdown failed, forcing close")
 			srv.Close()
 		}
 
-		log.Println("Shutdown complete")
+		log.Info().Msg("shutdown complete")
 	}
 }
 
@@ -554,7 +618,11 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 		// Debug logging for challenge validation failures
 		if cfg.Logging.Level == "debug" {
 			clientIP := clientIPFromHeaders(r)
-			log.Printf("Challenge validation failed: reason=%s id=%s ip=%s", reason, req.ChallengeID, clientIP)
+			log.Debug().
+				Str("reason", reason).
+				Str("challenge_id", req.ChallengeID).
+				Str("client_ip", clientIP).
+				Msg("challenge validation failed")
 		}
 
 		switch reason {
@@ -582,8 +650,12 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 		assessment := analyzer.Analyze(req.Entropy)
 
 		if cfg.Logging.Level == "debug" {
-			log.Printf("Entropy assessment: bot=%.2f confidence=%.2f suspicious=%v reasons=%v",
-				assessment.BotScore, assessment.Confidence, assessment.IsSuspicious, assessment.Reasons)
+			log.Debug().
+				Float64("bot_score", assessment.BotScore).
+				Float64("confidence", assessment.Confidence).
+				Bool("suspicious", assessment.IsSuspicious).
+				Interface("reasons", assessment.Reasons).
+				Msg("entropy assessment")
 		}
 
 		// Upgrade tier if low bot score and high confidence
@@ -595,7 +667,10 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 		if assessment.IsBot {
 			tier = "low" // Keep low tier for bot-like behavior
 			if cfg.Logging.Level == "debug" {
-				log.Printf("Bot detected (score=%.2f): %v", assessment.BotScore, assessment.Reasons)
+				log.Debug().
+					Float64("bot_score", assessment.BotScore).
+					Interface("reasons", assessment.Reasons).
+					Msg("bot detected")
 			}
 		}
 	}
@@ -609,7 +684,7 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 	metrics.ChallengeSolved.Inc()
 
 	if cfg.Logging.Level == "debug" {
-		log.Printf("Clearance issued: tier=%s", tier)
+		log.Debug().Str("tier", tier).Msg("clearance issued")
 	}
 
 	if retURL == "" {

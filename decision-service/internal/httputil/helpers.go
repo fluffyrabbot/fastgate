@@ -1,6 +1,9 @@
 package httputil
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net"
@@ -9,7 +12,85 @@ import (
 	"strings"
 
 	"fastgate/decision-service/internal/config"
+	"github.com/rs/zerolog"
 )
+
+// Context keys for request metadata
+type contextKey int
+
+const (
+	requestIDKey contextKey = iota
+	loggerKey
+)
+
+// GenerateRequestID creates a new random request ID
+func GenerateRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return hex.EncodeToString([]byte(strings.Replace(http.TimeFormat, " ", "", -1)))
+	}
+	return hex.EncodeToString(b)
+}
+
+// WithRequestID adds request ID to context
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDKey, requestID)
+}
+
+// GetRequestID retrieves request ID from context
+func GetRequestID(ctx context.Context) string {
+	if reqID, ok := ctx.Value(requestIDKey).(string); ok {
+		return reqID
+	}
+	return ""
+}
+
+// WithLogger adds logger to context
+func WithLogger(ctx context.Context, logger *zerolog.Logger) context.Context {
+	return context.WithValue(ctx, loggerKey, logger)
+}
+
+// GetLogger retrieves logger from context
+func GetLogger(ctx context.Context) *zerolog.Logger {
+	if logger, ok := ctx.Value(loggerKey).(*zerolog.Logger); ok {
+		return logger
+	}
+	// Return a disabled logger if none found (shouldn't happen)
+	nopLogger := zerolog.Nop()
+	return &nopLogger
+}
+
+// RequestIDMiddleware extracts or generates request ID and adds it to context and headers
+func RequestIDMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Try to get request ID from header (for request tracing across services)
+			requestID := r.Header.Get("X-Request-ID")
+			if requestID == "" {
+				requestID = GenerateRequestID()
+			}
+
+			// Add request ID to response header
+			w.Header().Set("X-Request-ID", requestID)
+
+			// Create request-scoped logger with request ID
+			reqLogger := logger.With().
+				Str("request_id", requestID).
+				Str("method", r.Method).
+				Str("path", r.URL.Path).
+				Str("remote_addr", r.RemoteAddr).
+				Logger()
+
+			// Add request ID and logger to context
+			ctx := WithRequestID(r.Context(), requestID)
+			ctx = WithLogger(ctx, &reqLogger)
+
+			// Continue with updated context
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
 
 // SanitizeReturnURL prevents open redirect attacks by restricting to same-origin paths.
 // Accepts: "/", "/path", "/path?query", but NOT "//host", "http://", "https://".

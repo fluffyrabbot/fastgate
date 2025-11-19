@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -18,6 +17,8 @@ import (
 	"fastgate/decision-service/internal/config"
 	internalhttp "fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/metrics"
+
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -233,7 +234,10 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 
 	// Prevent request smuggling - detect suspicious header combinations
 	if r.Header.Get("Content-Length") != "" && r.Header.Get("Transfer-Encoding") != "" {
-		log.Printf("WARNING: Both Content-Length and Transfer-Encoding present from %s", r.RemoteAddr)
+		logger := internalhttp.GetLogger(r.Context())
+		logger.Warn().
+			Str("remote_addr", r.RemoteAddr).
+			Msg("request smuggling attempt detected: both Content-Length and Transfer-Encoding present")
 		// Per RFC 7230, Transfer-Encoding takes precedence
 		r.Header.Del("Content-Length")
 	}
@@ -282,7 +286,7 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 	// Create new proxy
 	target, err := url.Parse(originURL)
 	if err != nil {
-		log.Printf("Failed to parse origin URL %s: %v", originURL, err)
+		log.Error().Str("origin", originURL).Err(err).Msg("failed to parse origin URL")
 		return nil
 	}
 
@@ -306,10 +310,15 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 		ForceAttemptHTTP2:  true,
 	}
 
-	// Configure director to set trusted X-Forwarded-* headers
+	// Configure director to set trusted X-Forwarded-* headers and propagate request ID
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
+
+		// Propagate request ID for distributed tracing
+		if requestID := internalhttp.GetRequestID(req.Context()); requestID != "" {
+			req.Header.Set("X-Request-ID", requestID)
+		}
 
 		// Set trusted X-Forwarded-* headers (untrusted ones were deleted earlier)
 		if clientIP := getClientIP(req); clientIP != "" {
@@ -326,19 +335,25 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 
 	// Error handler with error differentiation and context handling
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		logger := internalhttp.GetLogger(r.Context())
+
 		// Client disconnected - don't log as error
 		if err == context.Canceled || err == context.DeadlineExceeded {
-			if h.cfg.Logging.Level == "debug" {
-				log.Printf("Proxy request canceled: %v", err)
-			}
+			logger.Debug().
+				Str("origin", originURL).
+				Str("error_type", "context").
+				Msg("proxy request canceled")
 			metrics.ProxyErrors.WithLabelValues(originURL, "context").Inc()
 			return
 		}
 
-		log.Printf("Proxy error for %s: %v", originURL, err)
-
 		// Differentiate timeout errors
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			logger.Warn().
+				Str("origin", originURL).
+				Str("error_type", "timeout").
+				Err(err).
+				Msg("proxy timeout")
 			metrics.ProxyErrors.WithLabelValues(originURL, "timeout").Inc()
 			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
 			return
@@ -346,7 +361,11 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 
 		// DNS errors
 		if dnsErr, ok := err.(*net.DNSError); ok {
-			log.Printf("DNS resolution failed for %s: %v", originURL, dnsErr)
+			logger.Error().
+				Str("origin", originURL).
+				Str("error_type", "dns").
+				Err(dnsErr).
+				Msg("DNS resolution failed")
 			metrics.ProxyErrors.WithLabelValues(originURL, "dns").Inc()
 			http.Error(w, "service unavailable: DNS error", http.StatusServiceUnavailable)
 			return
@@ -354,12 +373,22 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 
 		// Connection errors
 		if strings.Contains(err.Error(), "connection refused") {
+			logger.Error().
+				Str("origin", originURL).
+				Str("error_type", "connection").
+				Err(err).
+				Msg("connection refused")
 			metrics.ProxyErrors.WithLabelValues(originURL, "connection").Inc()
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
 		// Default to bad gateway
+		logger.Error().
+			Str("origin", originURL).
+			Str("error_type", "other").
+			Err(err).
+			Msg("proxy error")
 		metrics.ProxyErrors.WithLabelValues(originURL, "other").Inc()
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}
@@ -404,7 +433,7 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 	for origin, cp := range h.proxies {
 		if transport, ok := cp.proxy.Transport.(*http.Transport); ok {
 			transport.CloseIdleConnections()
-			log.Printf("Closed idle connections for origin: %s", origin)
+			log.Info().Str("origin", origin).Msg("closed idle connections for origin")
 		}
 	}
 
