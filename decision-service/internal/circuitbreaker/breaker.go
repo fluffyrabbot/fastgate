@@ -67,9 +67,9 @@ type CircuitBreaker struct {
 	config Config
 
 	state         atomic.Int32 // State (using atomic for lock-free reads)
-	failures      atomic.Int32 // Consecutive failure count
-	successes     atomic.Int32 // Consecutive success count (in half-open)
-	requests      atomic.Int32 // Total requests in current window
+	failures      atomic.Int64 // Consecutive failure count (Int64 to prevent overflow)
+	successes     atomic.Int64 // Consecutive success count (in half-open)
+	requests      atomic.Int64 // Total requests in current window
 	lastFailTime  atomic.Int64 // Unix nano timestamp of last failure
 	lastStateTime atomic.Int64 // Unix nano timestamp of last state change
 
@@ -78,12 +78,14 @@ type CircuitBreaker struct {
 
 // New creates a new circuit breaker for a backend
 func New(name string, config Config) *CircuitBreaker {
+	now := time.Now()
 	cb := &CircuitBreaker{
 		name:   name,
 		config: config,
 	}
 	cb.state.Store(int32(StateClosed))
-	cb.lastStateTime.Store(time.Now().UnixNano())
+	cb.lastStateTime.Store(now.UnixNano())
+	cb.lastFailTime.Store(now.UnixNano()) // Initialize to prevent edge case on first failure
 
 	// Initialize Prometheus metric
 	metrics.ProxyCircuitState.WithLabelValues(name).Set(float64(StateClosed))
@@ -105,8 +107,9 @@ func (cb *CircuitBreaker) Allow() error {
 		// Check if timeout has elapsed
 		now := time.Now()
 		lastFail := time.Unix(0, cb.lastFailTime.Load())
+		elapsed := now.Sub(lastFail)
 
-		if now.Sub(lastFail) >= cb.config.Timeout {
+		if elapsed >= cb.config.Timeout {
 			// Attempt transition to half-open
 			cb.mu.Lock()
 			// Double-check state hasn't changed
@@ -119,11 +122,20 @@ func (cb *CircuitBreaker) Allow() error {
 			cb.mu.Unlock()
 		}
 
-		return fmt.Errorf("circuit breaker open for %s", cb.name)
+		// Calculate time until retry
+		timeUntilRetry := cb.config.Timeout - elapsed
+		return fmt.Errorf("circuit breaker open for %s (retry in %v)", cb.name, timeUntilRetry.Round(time.Second))
 
 	case StateHalfOpen:
-		// Allow limited requests to test backend health
-		cb.requests.Add(1)
+		// Allow limited requests to test backend health (prevent thundering herd)
+		// Only allow up to SuccessThreshold concurrent probes
+		currentRequests := cb.requests.Add(1)
+		if int(currentRequests) > cb.config.SuccessThreshold {
+			cb.requests.Add(-1) // Rollback
+			return fmt.Errorf("circuit breaker half-open for %s: probe limit reached", cb.name)
+		}
+		// Record that we're allowing a probe request
+		metrics.ProxyCircuitHalfOpenProbes.WithLabelValues(cb.name).Inc()
 		return nil
 
 	default:
@@ -231,6 +243,11 @@ func (cb *CircuitBreaker) transitionTo(newState State) {
 	metrics.ProxyCircuitState.WithLabelValues(cb.name).Set(float64(newState))
 	metrics.ProxyCircuitTransitions.WithLabelValues(cb.name, oldState.String(), newState.String()).Inc()
 
+	// Track circuit opens for alerting
+	if newState == StateOpen {
+		metrics.ProxyCircuitOpens.WithLabelValues(cb.name).Inc()
+	}
+
 	log.Info().
 		Str("backend", cb.name).
 		Str("old_state", oldState.String()).
@@ -278,11 +295,13 @@ func (cb *CircuitBreaker) Reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	now := time.Now().UnixNano()
 	cb.state.Store(int32(StateClosed))
 	cb.failures.Store(0)
 	cb.successes.Store(0)
 	cb.requests.Store(0)
-	cb.lastStateTime.Store(time.Now().UnixNano())
+	cb.lastStateTime.Store(now)
+	cb.lastFailTime.Store(now) // Reset to prevent stale timestamps
 
 	log.Info().
 		Str("backend", cb.name).

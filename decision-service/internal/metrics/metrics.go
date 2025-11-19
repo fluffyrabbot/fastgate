@@ -141,6 +141,20 @@ var (
 		},
 		[]string{"origin", "from_state", "to_state"},
 	)
+	ProxyCircuitOpens = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_proxy_circuit_opens_total",
+			Help: "Total number of times circuit breaker opened by origin",
+		},
+		[]string{"origin"},
+	)
+	ProxyCircuitHalfOpenProbes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fastgate_proxy_circuit_halfopen_probes_total",
+			Help: "Number of probe requests allowed in half-open state",
+		},
+		[]string{"origin"},
+	)
 )
 
 func MustRegister() {
@@ -164,6 +178,8 @@ func MustRegister() {
 		ProxyCircuitState,
 		ProxyCircuitOpen,
 		ProxyCircuitTransitions,
+		ProxyCircuitOpens,
+		ProxyCircuitHalfOpenProbes,
 	}
 
 	for _, c := range collectors {

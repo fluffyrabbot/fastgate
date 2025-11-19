@@ -476,6 +476,86 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+// Test zero/invalid config values
+// Note: Config validation (in config.go) prevents these values in production.
+// This test documents the actual circuit breaker behavior with invalid configs.
+func TestZeroConfigValues(t *testing.T) {
+	t.Run("zero failure threshold opens immediately", func(t *testing.T) {
+		// With FailureThreshold=0, any failure (>= 0) opens the circuit
+		config := Config{
+			FailureThreshold:        0,
+			SuccessThreshold:        2,
+			Timeout:                 5 * time.Second,
+			MinimumRequestThreshold: 0,
+			SlidingWindowSize:       10 * time.Second,
+		}
+		cb := New("test-backend", config)
+
+		// First failure should open circuit (>= 0)
+		cb.Allow()
+		cb.RecordFailure()
+
+		if cb.State() != StateOpen {
+			t.Errorf("expected circuit to open with zero threshold, got: %v", cb.State())
+		}
+	})
+
+	t.Run("zero success threshold closes immediately", func(t *testing.T) {
+		// With SuccessThreshold=0, any success (>= 0) closes the circuit
+		config := Config{
+			FailureThreshold:        2,
+			SuccessThreshold:        0,
+			Timeout:                 50 * time.Millisecond,
+			MinimumRequestThreshold: 1,
+			SlidingWindowSize:       10 * time.Second,
+		}
+		cb := New("test-backend", config)
+
+		// Open the circuit
+		cb.Allow()
+		cb.Allow()
+		cb.RecordFailure()
+		cb.RecordFailure()
+
+		if cb.State() != StateOpen {
+			t.Fatal("circuit should be open")
+		}
+
+		// Wait and transition to half-open
+		time.Sleep(100 * time.Millisecond)
+		cb.Allow()
+
+		// First success should close circuit (>= 0)
+		cb.RecordSuccess()
+
+		if cb.State() != StateClosed {
+			t.Errorf("expected circuit to close with zero success threshold, got: %v", cb.State())
+		}
+	})
+
+	t.Run("negative thresholds are undefined behavior", func(t *testing.T) {
+		// Config validation prevents this, but document behavior if it happens
+		config := Config{
+			FailureThreshold:        -1,
+			SuccessThreshold:        2,
+			Timeout:                 5 * time.Second,
+			MinimumRequestThreshold: 1,
+			SlidingWindowSize:       10 * time.Second,
+		}
+		cb := New("test-backend", config)
+
+		// With negative threshold, circuit will never open (no value >= -1)
+		for i := 0; i < 10; i++ {
+			cb.Allow()
+			cb.RecordFailure()
+		}
+
+		if cb.State() != StateClosed {
+			t.Logf("Note: negative threshold behavior is undefined, got: %v", cb.State())
+		}
+	})
+}
+
 // Benchmark concurrent Allow() calls
 func BenchmarkAllow(b *testing.B) {
 	config := DefaultConfig()

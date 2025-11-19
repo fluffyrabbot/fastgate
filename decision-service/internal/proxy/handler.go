@@ -416,7 +416,8 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		logger := internalhttp.GetLogger(r.Context())
 
-		// Client disconnected - don't log as error
+		// Client disconnected - don't log as error or record circuit breaker failure
+		// These are client-side cancellations, not backend failures
 		if err == context.Canceled || err == context.DeadlineExceeded {
 			logger.Debug().
 				Str("origin", originURL).
@@ -424,6 +425,13 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 				Msg("proxy request canceled")
 			metrics.ProxyErrors.WithLabelValues(originURL, "context").Inc()
 			return
+		}
+
+		// For all other errors, record circuit breaker failure (if enabled)
+		// These indicate backend problems: timeouts, connection failures, DNS issues
+		if h.cfg.Proxy.CircuitBreaker.Enabled {
+			cb := h.circuitBreakers.GetOrCreate(originURL)
+			cb.RecordFailure()
 		}
 
 		// Differentiate timeout errors

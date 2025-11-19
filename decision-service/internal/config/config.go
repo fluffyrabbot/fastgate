@@ -492,6 +492,25 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("proxy.routes[%d].origin must start with http:// or https://", i)
 			}
 		}
+
+		// Circuit breaker validation (if enabled)
+		if c.Proxy.CircuitBreaker.Enabled {
+			if c.Proxy.CircuitBreaker.FailureThreshold <= 0 || c.Proxy.CircuitBreaker.FailureThreshold > 100 {
+				return fmt.Errorf("proxy.circuit_breaker.failure_threshold must be in (0, 100], got %d", c.Proxy.CircuitBreaker.FailureThreshold)
+			}
+			if c.Proxy.CircuitBreaker.SuccessThreshold <= 0 || c.Proxy.CircuitBreaker.SuccessThreshold > 100 {
+				return fmt.Errorf("proxy.circuit_breaker.success_threshold must be in (0, 100], got %d", c.Proxy.CircuitBreaker.SuccessThreshold)
+			}
+			if c.Proxy.CircuitBreaker.TimeoutSec <= 0 || c.Proxy.CircuitBreaker.TimeoutSec > 600 {
+				return fmt.Errorf("proxy.circuit_breaker.timeout_sec must be in (0, 600], got %d", c.Proxy.CircuitBreaker.TimeoutSec)
+			}
+			if c.Proxy.CircuitBreaker.MinimumRequestThreshold < 0 || c.Proxy.CircuitBreaker.MinimumRequestThreshold > 1000 {
+				return fmt.Errorf("proxy.circuit_breaker.minimum_request_threshold must be in [0, 1000], got %d", c.Proxy.CircuitBreaker.MinimumRequestThreshold)
+			}
+			if c.Proxy.CircuitBreaker.SlidingWindowSec <= 0 || c.Proxy.CircuitBreaker.SlidingWindowSec > 3600 {
+				return fmt.Errorf("proxy.circuit_breaker.sliding_window_sec must be in (0, 3600], got %d", c.Proxy.CircuitBreaker.SlidingWindowSec)
+			}
+		}
 	}
 
 	return nil
