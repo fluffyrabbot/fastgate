@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -218,8 +219,25 @@ func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originUR
 		return
 	}
 
-	// Limit request body size to prevent memory exhaustion
+	// SECURITY: Validate Content-Length header before reading body to prevent resource exhaustion
 	maxBodySize := int64(h.cfg.Proxy.MaxBodySizeMB) * 1024 * 1024
+	if contentLength := r.Header.Get("Content-Length"); contentLength != "" {
+		if length, err := strconv.ParseInt(contentLength, 10, 64); err == nil {
+			if length > maxBodySize {
+				logger := internalhttp.GetLogger(r.Context())
+				logger.Warn().
+					Str("remote_addr", r.RemoteAddr).
+					Int64("content_length", length).
+					Int64("max_body_size", maxBodySize).
+					Msg("request body exceeds max size")
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+		}
+		// If parsing fails, let MaxBytesReader handle it downstream
+	}
+
+	// Limit request body size to prevent memory exhaustion
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 
 	// Clean up auth-request headers before proxying

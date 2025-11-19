@@ -271,9 +271,9 @@ func main() {
 		// Proxy handler for all other requests
 		mux.Handle("/", proxyHandler)
 
-		// Apply middleware chain: request ID → common headers
+		// Apply middleware chain: request ID (with trusted proxies) → common headers
 		handler = Chain(
-			httputil.RequestIDMiddleware(log.Logger),
+			httputil.RequestIDMiddleware(log.Logger, cfg.Server.TrustedProxyCIDRs),
 			withCommonHeaders,
 		)(mux)
 	} else {
@@ -332,9 +332,9 @@ func main() {
 		// Admin stats endpoint for dashboard
 		mux.Handle("/admin/stats", http.HandlerFunc(handleAdminStats))
 
-		// Apply middleware chain: request ID → common headers
+		// Apply middleware chain: request ID (with trusted proxies) → common headers
 		handler = Chain(
-			httputil.RequestIDMiddleware(log.Logger),
+			httputil.RequestIDMiddleware(log.Logger, cfg.Server.TrustedProxyCIDRs),
 			withCommonHeaders,
 		)(mux)
 	}
@@ -399,6 +399,11 @@ func main() {
 		// Close intel store
 		if intelStore != nil {
 			intelStore.Close()
+		}
+
+		// Shutdown authz handler (stop WebSocket timers)
+		if authzHandler != nil {
+			authzHandler.Shutdown()
 		}
 
 		// Shutdown proxy handler (if in integrated mode)
@@ -531,6 +536,10 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 // ---- Challenge Handler Functions (for integrated mode) ----
 
 func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Config, chIssuer *challenge.StatelessIssuer, chNonceRPS *rate.SlidingRPS) {
+	// Get request ID and logger from context for distributed tracing
+	requestID := httputil.GetRequestID(r.Context())
+	logger := httputil.GetLogger(r.Context())
+
 	// Method & body caps
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
@@ -554,6 +563,11 @@ func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Co
 	ip := clientIPFromHeaders(r)
 	if ip != "" {
 		if rps := chNonceRPS.Add("nonce:" + ip); rps > cfg.Challenge.NonceRPSLimit {
+			logger.Warn().
+				Str("request_id", requestID).
+				Str("client_ip", ip).
+				Float64("rps", rps).
+				Msg("challenge nonce rate limit exceeded")
 			metrics.RateLimitHits.WithLabelValues("challenge_nonce").Inc()
 			w.Header().Set("Retry-After", strconv.Itoa(cfg.Challenge.RetryAfterSec))
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
@@ -564,10 +578,20 @@ func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Co
 	// Mint challenge with configured difficulty & retries
 	token, nonce, err := chIssuer.Issue(cfg.Challenge.DifficultyBits, time.Duration(cfg.Challenge.TTLSec)*time.Second, ip)
 	if err != nil {
+		logger.Error().
+			Str("request_id", requestID).
+			Err(err).
+			Msg("failed to issue challenge")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
 	}
 	metrics.ChallengeStarted.Inc()
+
+	logger.Debug().
+		Str("request_id", requestID).
+		Str("client_ip", ip).
+		Int("difficulty_bits", cfg.Challenge.DifficultyBits).
+		Msg("challenge nonce issued")
 
 	resp := map[string]any{
 		"challenge_id":    token, // Stateless: ID is the signed token
@@ -580,6 +604,10 @@ func handleChallengeNonce(w http.ResponseWriter, r *http.Request, cfg *config.Co
 }
 
 func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config.Config, chIssuer *challenge.StatelessIssuer, kr *token.Keyring) {
+	// Get request ID and logger from context for distributed tracing
+	requestID := httputil.GetRequestID(r.Context())
+	logger := httputil.GetLogger(r.Context())
+
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 		return
@@ -597,6 +625,10 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 	}
 	var req Req
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn().
+			Str("request_id", requestID).
+			Err(err).
+			Msg("invalid JSON in challenge complete")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
 		return
 	}
@@ -622,13 +654,13 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 	// Verify JWS token (stateless)
 	ok, reason, _ := chIssuer.Verify(req.ChallengeID, req.Solution, clientIP)
 	if !ok {
-		// Debug logging for challenge validation failures
-		if cfg.Logging.Level == "debug" {
-			log.Debug().
-				Str("reason", reason).
-				Str("client_ip", clientIP).
-				Msg("challenge validation failed")
-		}
+		// Security event logging with full context
+		logger.Warn().
+			Str("request_id", requestID).
+			Str("reason", reason).
+			Str("client_ip", clientIP).
+			Str("user_agent", r.Header.Get("User-Agent")).
+			Msg("challenge validation failed")
 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": reason})
 		return
@@ -670,15 +702,21 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 
 	tokenStr, err := kr.Sign(tier, cfg.CookieMaxAge())
 	if err != nil {
+		logger.Error().
+			Str("request_id", requestID).
+			Err(err).
+			Msg("failed to sign clearance token")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
 	}
 	http.SetCookie(w, httputil.BuildCookie(cfg, tokenStr))
 	metrics.ChallengeSolved.Inc()
 
-	if cfg.Logging.Level == "debug" {
-		log.Debug().Str("tier", tier).Msg("clearance issued")
-	}
+	logger.Info().
+		Str("request_id", requestID).
+		Str("tier", tier).
+		Str("client_ip", clientIP).
+		Msg("clearance issued")
 
 	if retURL == "" {
 		retURL = "/"

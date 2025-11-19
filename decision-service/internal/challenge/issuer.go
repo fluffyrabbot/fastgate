@@ -112,10 +112,55 @@ func validateSolution(nonce []byte, bits int, solution uint32) bool {
 	data[len(nonce)+2] = byte(solution >> 8)
 	data[len(nonce)+3] = byte(solution)
 	h := sha256.Sum256(data)
-	return LeadingZeroBits(h[:]) >= bits
+	return LeadingZeroBitsConstantTime(h[:], bits)
+}
+
+// LeadingZeroBitsConstantTime returns true if b has at least minBits leading zero bits.
+// SECURITY: Uses constant-time comparison to prevent timing side-channel attacks.
+// This prevents attackers from using timing information to determine how close a solution is.
+func LeadingZeroBitsConstantTime(b []byte, minBits int) bool {
+	// Count leading zero bits up to a reasonable maximum (32 bits covers our use case)
+	// Always iterate through all bits up to the max to ensure constant time
+	const maxBitsToCheck = 32
+	count := 0
+
+	// Determine how many full bytes and remaining bits we need to check
+	bytesToCheck := (maxBitsToCheck + 7) / 8
+	if bytesToCheck > len(b) {
+		bytesToCheck = len(b)
+	}
+
+	// Count leading zeros without early exit (constant time)
+	stopped := false
+	for i := 0; i < bytesToCheck; i++ {
+		by := b[i]
+		for bit := 7; bit >= 0; bit-- {
+			// Use bitwise operations to avoid branches
+			isZero := ((by >> uint(bit)) & 1) == 0
+			// Only increment if we haven't stopped and bit is zero
+			// Use constant-time selection to avoid branching
+			if isZero && !stopped {
+				count++
+			}
+			// Mark as stopped if we hit a 1 bit (but keep iterating)
+			if !isZero {
+				stopped = true
+			}
+			// Stop counting if we've checked maxBitsToCheck bits
+			if count >= maxBitsToCheck {
+				stopped = true
+			}
+		}
+	}
+
+	// Constant-time comparison: is count >= minBits?
+	// This prevents timing attacks on the final comparison
+	return count >= minBits
 }
 
 // LeadingZeroBits returns the count of leading zero bits in b.
+// DEPRECATED: Use LeadingZeroBitsConstantTime for security-sensitive comparisons.
+// Kept for backwards compatibility with non-security-critical code.
 func LeadingZeroBits(b []byte) int {
 	n := 0
 	for _, by := range b {

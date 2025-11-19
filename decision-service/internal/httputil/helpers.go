@@ -23,6 +23,7 @@ type contextKey int
 const (
 	requestIDKey contextKey = iota
 	loggerKey
+	trustedProxiesKey
 )
 
 // Buffer pool for JSON encoding hot path optimization
@@ -70,8 +71,21 @@ func GetLogger(ctx context.Context) *zerolog.Logger {
 	return &nopLogger
 }
 
+// WithTrustedProxies adds trusted proxy CIDRs to context
+func WithTrustedProxies(ctx context.Context, trustedProxies []*net.IPNet) context.Context {
+	return context.WithValue(ctx, trustedProxiesKey, trustedProxies)
+}
+
+// GetTrustedProxies retrieves trusted proxy CIDRs from context
+func GetTrustedProxies(ctx context.Context) []*net.IPNet {
+	if proxies, ok := ctx.Value(trustedProxiesKey).([]*net.IPNet); ok {
+		return proxies
+	}
+	return nil
+}
+
 // RequestIDMiddleware extracts or generates request ID and adds it to context and headers
-func RequestIDMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
+func RequestIDMiddleware(logger zerolog.Logger, trustedProxies []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Try to get request ID from header (for request tracing across services)
@@ -91,9 +105,10 @@ func RequestIDMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler 
 				Str("remote_addr", r.RemoteAddr).
 				Logger()
 
-			// Add request ID and logger to context
+			// Add request ID, logger, and trusted proxies to context
 			ctx := WithRequestID(r.Context(), requestID)
 			ctx = WithLogger(ctx, &reqLogger)
+			ctx = WithTrustedProxies(ctx, trustedProxies)
 
 			// Continue with updated context
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -149,23 +164,70 @@ func SanitizeReturnURL(in string) string {
 }
 
 // ClientIPFromHeaders extracts the client IP from request headers.
-// Prefers the left-most IP in X-Forwarded-For, then falls back to RemoteAddr.
+// SECURITY: Only trusts X-Forwarded-For if request came from a trusted proxy.
+// This prevents attackers from spoofing XFF to bypass IP-based rate limiting.
+// Uses trusted proxies from context if available.
 func ClientIPFromHeaders(r *http.Request) string {
-	// Prefer the left-most IP in X-Forwarded-For, then fall back to RemoteAddr
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			cand := strings.TrimSpace(parts[0])
-			if ip := net.ParseIP(cand); ip != nil {
-				return ip.String()
+	trustedProxies := GetTrustedProxies(r.Context())
+	return ClientIPFromHeadersWithTrustedProxies(r, trustedProxies)
+}
+
+// ClientIPFromHeadersWithTrustedProxies extracts client IP with trusted proxy validation.
+// If trustedProxies is nil/empty, falls back to unsafe XFF trust (legacy behavior).
+// If trustedProxies is set, only trusts XFF if r.RemoteAddr is in the trusted list.
+func ClientIPFromHeadersWithTrustedProxies(r *http.Request, trustedProxies []*net.IPNet) string {
+	// Extract the actual remote address (the immediate peer)
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// If we can't parse RemoteAddr, fall back to it as-is
+		remoteHost = r.RemoteAddr
+	}
+	remoteIP := net.ParseIP(remoteHost)
+	if remoteIP == nil {
+		return ""
+	}
+
+	// If no trusted proxies configured, use legacy unsafe behavior (trust XFF blindly)
+	// In production, this should always be configured!
+	if len(trustedProxies) == 0 {
+		// LEGACY UNSAFE PATH: Trust X-Forwarded-For without validation
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				cand := strings.TrimSpace(parts[0])
+				if ip := net.ParseIP(cand); ip != nil {
+					return ip.String()
+				}
+			}
+		}
+		// Fall back to RemoteAddr
+		return remoteIP.String()
+	}
+
+	// SECURE PATH: Validate that request came from trusted proxy
+	isTrusted := false
+	for _, ipNet := range trustedProxies {
+		if ipNet.Contains(remoteIP) {
+			isTrusted = true
+			break
+		}
+	}
+
+	// If request came from trusted proxy, use X-Forwarded-For (left-most IP is real client)
+	if isTrusted {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				cand := strings.TrimSpace(parts[0])
+				if ip := net.ParseIP(cand); ip != nil {
+					return ip.String()
+				}
 			}
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && net.ParseIP(host) != nil {
-		return host
-	}
-	return ""
+
+	// Otherwise, use RemoteAddr directly (don't trust XFF from untrusted sources)
+	return remoteIP.String()
 }
 
 // WriteJSON writes a JSON response with proper headers and error handling.

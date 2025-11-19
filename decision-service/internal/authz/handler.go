@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fastgate/decision-service/internal/config"
@@ -27,15 +28,18 @@ var hashPool = sync.Pool{
 }
 
 type Handler struct {
-	Cfg        *config.Config
-	Keyring    *token.Keyring
-	IPRPS      *rate.SlidingRPS
-	TokenRPS   *rate.SlidingRPS
-	WSConcIP   *rate.Concurrency
-	WSConcTok  *rate.Concurrency
-	wsLease    time.Duration // assumed WS lifetime; controls auto-release
-	IntelStore *intel.Store
+	Cfg         *config.Config
+	Keyring     *token.Keyring
+	IPRPS       *rate.SlidingRPS
+	TokenRPS    *rate.SlidingRPS
+	WSConcIP    *rate.Concurrency
+	WSConcTok   *rate.Concurrency
+	wsLease     time.Duration // assumed WS lifetime; controls auto-release
+	IntelStore  *intel.Store
 	TAXIIServer *intel.TAXIIServer
+	// SECURITY: Track WebSocket auto-release timers to prevent goroutine leak
+	wsTimers    sync.Map // key: timer ID (string), value: *time.Timer
+	wsTimerSeq  uint64   // atomic counter for unique timer IDs
 }
 
 func NewHandler(cfg *config.Config, kr *token.Keyring) *Handler {
@@ -152,17 +156,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			metrics.WSUpgrades.WithLabelValues("deny").Inc()
 		}
 
-		// Debug logging
-		if h.Cfg.Logging.Level == "debug" {
-			log.Debug().
-				Str("decision", "block").
-				Str("client_ip", clientIP).
-				Int("score", score).
-				Interface("reasons", reasons).
-				Str("method", method).
-				Str("uri", uri).
-				Msg("authz decision")
-		}
+		// Security event logging with full context
+		logger := httputil.GetLogger(r.Context())
+		logger.Warn().
+			Str("decision", "block").
+			Str("request_id", httputil.GetRequestID(r.Context())).
+			Str("client_ip", clientIP).
+			Str("user_agent", ua).
+			Int("score", score).
+			Interface("reasons", reasons).
+			Str("method", method).
+			Str("uri", uri).
+			Msg("authz decision: blocked")
 
 		// Auto-publish to threat intel
 		if h.IntelStore != nil && h.TAXIIServer != nil && clientIP != "" {
@@ -180,16 +185,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			metrics.WSUpgrades.WithLabelValues("deny").Inc()
 		}
 
-		// Debug logging
+		// Security event logging with full context
 		if h.Cfg.Logging.Level == "debug" {
-			log.Debug().
+			logger := httputil.GetLogger(r.Context())
+			logger.Debug().
 				Str("decision", "challenge").
+				Str("request_id", httputil.GetRequestID(r.Context())).
 				Str("client_ip", clientIP).
+				Str("user_agent", ua).
 				Int("score", score).
 				Interface("reasons", reasons).
 				Str("method", method).
 				Str("uri", uri).
-				Msg("authz decision")
+				Msg("authz decision: challenge")
 		}
 
 		setReasonHeaders(w, reasons, score)
@@ -222,14 +230,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Debug logging
 	if h.Cfg.Logging.Level == "debug" {
-		log.Debug().
+		logger := httputil.GetLogger(r.Context())
+		logger.Debug().
 			Str("decision", "allow").
+			Str("request_id", httputil.GetRequestID(r.Context())).
 			Str("client_ip", clientIP).
+			Str("user_agent", ua).
 			Int("score", score).
 			Interface("reasons", reasons).
 			Str("method", method).
 			Str("uri", uri).
-			Msg("authz decision")
+			Msg("authz decision: allow")
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -368,16 +379,44 @@ func (h *Handler) tryAcquireWS(clientIP, rawTok string) (ok bool, ipAcq bool, to
 }
 
 func (h *Handler) deferWSRelease(clientIP, rawTok string) {
+	// SECURITY FIX: Store timers to prevent goroutine leak on shutdown
 	// Auto-release after lease duration; best-effort cleanup.
 	if limit := h.Cfg.Policy.WSConcurrency.PerIP; limit > 0 && clientIP != "" {
 		ipKey := h.wsIPKey(clientIP)
-		time.AfterFunc(h.wsLease, func() { h.WSConcIP.Release(ipKey) })
+		timerID := fmt.Sprintf("ip:%d", atomic.AddUint64(&h.wsTimerSeq, 1))
+		timer := time.AfterFunc(h.wsLease, func() {
+			h.WSConcIP.Release(ipKey)
+			h.wsTimers.Delete(timerID) // Clean up timer reference
+		})
+		h.wsTimers.Store(timerID, timer)
 	}
 	if rawTok != "" {
 		if limit := h.Cfg.Policy.WSConcurrency.PerToken; limit > 0 {
 			tokKey := h.wsTokKey(rawTok)
-			time.AfterFunc(h.wsLease, func() { h.WSConcTok.Release(tokKey) })
+			timerID := fmt.Sprintf("tok:%d", atomic.AddUint64(&h.wsTimerSeq, 1))
+			timer := time.AfterFunc(h.wsLease, func() {
+				h.WSConcTok.Release(tokKey)
+				h.wsTimers.Delete(timerID) // Clean up timer reference
+			})
+			h.wsTimers.Store(timerID, timer)
 		}
+	}
+}
+
+// Shutdown gracefully shuts down the authz handler, stopping all pending timers
+func (h *Handler) Shutdown() {
+	// Stop all pending WebSocket auto-release timers
+	count := 0
+	h.wsTimers.Range(func(key, value interface{}) bool {
+		if timer, ok := value.(*time.Timer); ok {
+			timer.Stop()
+			count++
+		}
+		h.wsTimers.Delete(key)
+		return true
+	})
+	if count > 0 {
+		log.Info().Int("timers_stopped", count).Msg("authz handler shutdown: stopped WebSocket timers")
 	}
 }
 

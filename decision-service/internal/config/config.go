@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -12,12 +13,14 @@ import (
 )
 
 type ServerCfg struct {
-	Listen         string `yaml:"listen"`
-	TLSEnabled     bool   `yaml:"tls_enabled"`
-	TLSCertFile    string `yaml:"tls_cert_file"`
-	TLSKeyFile     string `yaml:"tls_key_file"`
-	ReadTimeoutMs  int    `yaml:"read_timeout_ms"`
-	WriteTimeoutMs int    `yaml:"write_timeout_ms"`
+	Listen            string      `yaml:"listen"`
+	TLSEnabled        bool        `yaml:"tls_enabled"`
+	TLSCertFile       string      `yaml:"tls_cert_file"`
+	TLSKeyFile        string      `yaml:"tls_key_file"`
+	ReadTimeoutMs     int         `yaml:"read_timeout_ms"`
+	WriteTimeoutMs    int         `yaml:"write_timeout_ms"`
+	TrustedProxies    []string    `yaml:"trusted_proxies"`     // CIDR ranges of trusted proxies (e.g., ["10.0.0.0/8", "172.16.0.0/12"])
+	TrustedProxyCIDRs []*net.IPNet `yaml:"-"` // Parsed CIDR ranges (populated during Load)
 }
 
 type ModesCfg struct {
@@ -170,6 +173,14 @@ func Load(path string) (*Config, error) {
 	// Server defaults
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8080"
+	}
+	// Parse trusted proxy CIDR ranges
+	for _, cidr := range cfg.Server.TrustedProxies {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted_proxies CIDR %q: %w", cidr, err)
+		}
+		cfg.Server.TrustedProxyCIDRs = append(cfg.Server.TrustedProxyCIDRs, ipNet)
 	}
 	// Cluster defaults
 	if cfg.Cluster.BindAddr == "" {
