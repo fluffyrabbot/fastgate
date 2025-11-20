@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"container/list"
 	"context"
 	"fmt"
@@ -426,6 +427,11 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 		}
 		req.Header.Set("X-Forwarded-Proto", getScheme(req))
 		req.Header.Set("X-Forwarded-Host", req.Host)
+
+		// Preserve WebSocket upgrade headers end-to-end
+		if strings.ToLower(req.Header.Get("Upgrade")) == "websocket" {
+			req.Header.Set("Connection", "Upgrade")
+		}
 	}
 
 	// Error handler with error differentiation and context handling
@@ -700,4 +706,12 @@ func (w *statusCapturingWriter) Write(b []byte) (int, error) {
 		w.wroteHeader = true
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// Hijack allows upgrades (e.g., WebSocket) to take over the client connection.
+func (w *statusCapturingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("response writer does not support hijacking")
 }

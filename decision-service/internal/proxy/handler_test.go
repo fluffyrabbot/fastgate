@@ -2,15 +2,20 @@ package proxy
 
 import (
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"fastgate/decision-service/internal/authz"
 	"fastgate/decision-service/internal/config"
 	"fastgate/decision-service/internal/token"
+
+	"github.com/gorilla/websocket"
 )
 
 // mockKeyring creates a keyring for testing
@@ -196,10 +201,31 @@ func TestHandler_ServeHTTP_Challenge(t *testing.T) {
 }
 
 func TestWebSocketLeaseReleasedAfterProxy(t *testing.T) {
-	// Upstream that does NOT upgrade; returns 200 to avoid hijack requirements in tests.
+	// Upstream WebSocket echo server.
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	var seenUpstream bool
+	var upgradeErr error
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		seenUpstream = true
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			upgradeErr = err
+			http.Error(w, "upgrade failed", http.StatusBadRequest)
+			return
+		}
+		defer conn.Close()
+
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, append([]byte("echo:"), msg...)); err != nil {
+			return
+		}
+		// Wait for close from client.
+		conn.ReadMessage()
 	}))
 	defer upstream.Close()
 
@@ -207,7 +233,8 @@ func TestWebSocketLeaseReleasedAfterProxy(t *testing.T) {
 	cfg.Proxy.Origin = upstream.URL
 	cfg.Modes.Enforce = true
 	cfg.Policy.WSConcurrency.PerIP = 1
-	cfg.Policy.WSConcurrency.PerToken = 0 // focus on IP lease
+	cfg.Policy.WSConcurrency.PerToken = 1
+	cfg.Proxy.TimeoutMs = 5000
 
 	kr := mockKeyring(t)
 	authzHandler := authz.NewHandler(cfg, kr)
@@ -216,37 +243,70 @@ func TestWebSocketLeaseReleasedAfterProxy(t *testing.T) {
 		t.Fatalf("NewHandler failed: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Connection", "Upgrade")
+	proxySrv := httptest.NewServer(h)
+	defer proxySrv.Close()
 
-	// Attach valid clearance cookie
 	tokenStr, err := kr.Sign("low", cfg.CookieMaxAge())
 	if err != nil {
 		t.Fatalf("failed to sign token: %v", err)
 	}
-	req.AddCookie(&http.Cookie{
-		Name:  cfg.Cookie.Name,
-		Value: tokenStr,
-	})
 
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 from proxy, got %d", w.Code)
+	wsURL, err := url.Parse(proxySrv.URL)
+	if err != nil {
+		t.Fatalf("parse proxy url: %v", err)
 	}
-	if body := w.Body.String(); body != "ok" {
-		t.Fatalf("unexpected body: %q", body)
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/ws"
+
+	dialer := websocket.Dialer{}
+	headers := http.Header{}
+	headers.Set("Cookie", cfg.Cookie.Name+"="+tokenStr)
+	clientIP := "203.0.113.10"
+	headers.Set("X-Forwarded-For", clientIP)
+
+	conn, resp, err := dialer.Dial(wsURL.String(), headers)
+	if err != nil {
+		if resp != nil {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("websocket dial failed: %v (status %d, body %q, upstreamSeen=%v, upgradeErr=%v)", err, resp.StatusCode, string(bodyBytes), seenUpstream, upgradeErr)
+		}
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	if upgradeErr != nil {
+		t.Fatalf("upstream upgrade error: %v", upgradeErr)
 	}
 
-	// After proxy completes, the WS lease should be released so we can acquire again.
-	clientIP := "ip:192.0.2.1" // httptest default remote addr is 192.0.2.1:1234
-	if ok, cur := authzHandler.WSConcIP.Acquire(clientIP, 1); !ok {
-		t.Fatalf("expected lease to be released; current count=%d", cur)
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	_, reply, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(reply) != "echo:ping" {
+		t.Fatalf("unexpected reply: %q", string(reply))
+	}
+
+	// Close cleanly to trigger lease release.
+	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	_ = conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	ipKey := "ip:" + clientIP
+	if ok, cur := authzHandler.WSConcIP.Acquire(ipKey, 1); !ok {
+		t.Fatalf("expected IP lease to be released; current count=%d", cur)
 	} else {
-		// cleanup to avoid leaking state into other tests
-		authzHandler.WSConcIP.Release(clientIP)
+		authzHandler.WSConcIP.Release(ipKey)
+	}
+
+	tokKey := authz.WSTokenKeyForTest(tokenStr)
+	if ok, cur := authzHandler.WSConcTok.Acquire(tokKey, 1); !ok {
+		t.Fatalf("expected token lease to be released; current count=%d", cur)
+	} else {
+		authzHandler.WSConcTok.Release(tokKey)
 	}
 }
 

@@ -451,6 +451,15 @@ func (h *Handler) Shutdown() {}
 
 func (h *Handler) wsIPKey(ip string) string { return "ip:" + ip }
 func (h *Handler) wsTokKey(tok string) string {
+	return wsTokKey(tok)
+}
+
+// WSTokenKeyForTest exposes the internal token key derivation for tests.
+func WSTokenKeyForTest(rawTok string) string {
+	return wsTokKey(rawTok)
+}
+
+func wsTokKey(tok string) string {
 	// Use a short, deterministic hash instead of the full JWT as the map key.
 	// Pool hash objects to reduce allocations
 	h64 := hashPool.Get().(hash.Hash64)
