@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"fastgate/decision-service/internal/config"
@@ -18,8 +17,6 @@ import (
 	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/rate"
 	"fastgate/decision-service/internal/token"
-
-	"github.com/rs/zerolog/log"
 )
 
 // Pool for hash.Hash64 to reduce allocations in WebSocket path
@@ -34,23 +31,18 @@ type Handler struct {
 	TokenRPS    *rate.SlidingRPS
 	WSConcIP    *rate.Concurrency
 	WSConcTok   *rate.Concurrency
-	wsLease     time.Duration // assumed WS lifetime; controls auto-release
 	IntelStore  *intel.Store
 	TAXIIServer *intel.TAXIIServer
-	// SECURITY: Track WebSocket auto-release timers to prevent goroutine leak
-	wsTimers    sync.Map // key: timer ID (string), value: *time.Timer
-	wsTimerSeq  uint64   // atomic counter for unique timer IDs
 }
 
 func NewHandler(cfg *config.Config, kr *token.Keyring) *Handler {
 	return &Handler{
 		Cfg:       cfg,
 		Keyring:   kr,
-		IPRPS:     rate.NewSlidingRPS(10),        // ~10s sliding window
+		IPRPS:     rate.NewSlidingRPS(10), // ~10s sliding window
 		TokenRPS:  rate.NewSlidingRPS(10),
-		WSConcIP:  rate.NewConcurrency(50000),    // bounded maps
+		WSConcIP:  rate.NewConcurrency(50000), // bounded maps
 		WSConcTok: rate.NewConcurrency(50000),
-		wsLease:   120 * time.Second,             // conservative default
 	}
 }
 
@@ -119,7 +111,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "challenge", http.StatusUnauthorized)
 			return
 		}
-		// Caps passed; allow, set metrics, and schedule auto-release.
+		// Caps passed; allow and defer release to proxy lifecycle.
 		metrics.WSUpgrades.WithLabelValues("allow").Inc()
 		metrics.AuthzDecision.WithLabelValues("allow").Inc()
 		// No need to reissue cookie; it's already valid, but refreshing is OK to reduce future near-expiry.
@@ -127,8 +119,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.SetCookie(w, httputil.BuildCookie(h.Cfg, tokenStr))
 			metrics.ClearanceIssued.Inc()
 		}
-		// Auto-release leases.
-		h.deferWSRelease(clientIP, rawTok)
+		// Defer lease release until proxy completes upgrade and connection closes.
+		h.setWSLeaseHeader(w, ipAcq, clientIP, tokAcq, rawTok)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -224,7 +216,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		metrics.WSUpgrades.WithLabelValues("allow").Inc()
-		h.deferWSRelease(clientIP, "") // release IP lease
+		h.setWSLeaseHeader(w, ipAcq, clientIP, false, "") // release IP lease after proxy finishes
 	}
 	metrics.AuthzDecision.WithLabelValues("allow").Inc()
 
@@ -348,6 +340,54 @@ func looksHeadless(ua string) bool {
 
 // ---- WS concurrency helpers ----
 
+// WSLeaseHeader carries internal lease metadata between authz and proxy handlers.
+const WSLeaseHeader = "X-FastGate-WS-Lease"
+
+// WSLease represents resources reserved for a WebSocket connection.
+type WSLease struct {
+	IPKey    string
+	TokenKey string
+}
+
+func (l WSLease) headerValue() string {
+	parts := make([]string, 0, 2)
+	if l.IPKey != "" {
+		parts = append(parts, "ip="+l.IPKey)
+	}
+	if l.TokenKey != "" {
+		parts = append(parts, "tok="+l.TokenKey)
+	}
+	return strings.Join(parts, ",")
+}
+
+// ParseWSLeaseHeader parses a serialized lease header into a WSLease.
+func ParseWSLeaseHeader(val string) *WSLease {
+	if val == "" {
+		return nil
+	}
+	lease := &WSLease{}
+	for _, part := range strings.Split(val, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "ip":
+			lease.IPKey = kv[1]
+		case "tok":
+			lease.TokenKey = kv[1]
+		}
+	}
+	if lease.IPKey == "" && lease.TokenKey == "" {
+		return nil
+	}
+	return lease
+}
+
 func (h *Handler) tryAcquireWS(clientIP, rawTok string) (ok bool, ipAcq bool, tokAcq bool, reason string) {
 	// Per-IP cap
 	if limit := h.Cfg.Policy.WSConcurrency.PerIP; limit > 0 && clientIP != "" {
@@ -378,49 +418,38 @@ func (h *Handler) tryAcquireWS(clientIP, rawTok string) (ok bool, ipAcq bool, to
 	return true, ipAcq, tokAcq, ""
 }
 
-func (h *Handler) deferWSRelease(clientIP, rawTok string) {
-	// SECURITY FIX: Store timers to prevent goroutine leak on shutdown
-	// Auto-release after lease duration; best-effort cleanup.
-	if limit := h.Cfg.Policy.WSConcurrency.PerIP; limit > 0 && clientIP != "" {
-		ipKey := h.wsIPKey(clientIP)
-		timerID := fmt.Sprintf("ip:%d", atomic.AddUint64(&h.wsTimerSeq, 1))
-		timer := time.AfterFunc(h.wsLease, func() {
-			h.WSConcIP.Release(ipKey)
-			h.wsTimers.Delete(timerID) // Clean up timer reference
-		})
-		h.wsTimers.Store(timerID, timer)
+func (h *Handler) setWSLeaseHeader(w http.ResponseWriter, ipAcq bool, clientIP string, tokAcq bool, rawTok string) {
+	lease := WSLease{}
+	if ipAcq && clientIP != "" {
+		lease.IPKey = h.wsIPKey(clientIP)
 	}
-	if rawTok != "" {
-		if limit := h.Cfg.Policy.WSConcurrency.PerToken; limit > 0 {
-			tokKey := h.wsTokKey(rawTok)
-			timerID := fmt.Sprintf("tok:%d", atomic.AddUint64(&h.wsTimerSeq, 1))
-			timer := time.AfterFunc(h.wsLease, func() {
-				h.WSConcTok.Release(tokKey)
-				h.wsTimers.Delete(timerID) // Clean up timer reference
-			})
-			h.wsTimers.Store(timerID, timer)
-		}
+	if tokAcq && rawTok != "" {
+		lease.TokenKey = h.wsTokKey(rawTok)
+	}
+	if lease.IPKey == "" && lease.TokenKey == "" {
+		return
+	}
+	w.Header().Set(WSLeaseHeader, lease.headerValue())
+}
+
+// ReleaseWSLease releases any acquired WebSocket concurrency slots.
+func (h *Handler) ReleaseWSLease(lease *WSLease) {
+	if lease == nil {
+		return
+	}
+	if lease.IPKey != "" {
+		h.WSConcIP.Release(lease.IPKey)
+	}
+	if lease.TokenKey != "" {
+		h.WSConcTok.Release(lease.TokenKey)
 	}
 }
 
-// Shutdown gracefully shuts down the authz handler, stopping all pending timers
-func (h *Handler) Shutdown() {
-	// Stop all pending WebSocket auto-release timers
-	count := 0
-	h.wsTimers.Range(func(key, value interface{}) bool {
-		if timer, ok := value.(*time.Timer); ok {
-			timer.Stop()
-			count++
-		}
-		h.wsTimers.Delete(key)
-		return true
-	})
-	if count > 0 {
-		log.Info().Int("timers_stopped", count).Msg("authz handler shutdown: stopped WebSocket timers")
-	}
-}
+// Shutdown gracefully shuts down the authz handler.
+// WebSocket leases are now released by the proxy when connections close, so no timer cleanup is required.
+func (h *Handler) Shutdown() {}
 
-func (h *Handler) wsIPKey(ip string) string  { return "ip:" + ip }
+func (h *Handler) wsIPKey(ip string) string { return "ip:" + ip }
 func (h *Handler) wsTokKey(tok string) string {
 	// Use a short, deterministic hash instead of the full JWT as the map key.
 	// Pool hash objects to reduce allocations

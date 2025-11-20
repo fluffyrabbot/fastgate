@@ -36,8 +36,8 @@ var (
 type cachedProxy struct {
 	proxy      *httputil.ReverseProxy
 	createdAt  time.Time
-	originURL  string         // Store origin for LRU eviction
-	lruElement *list.Element  // Pointer to element in LRU list
+	originURL  string        // Store origin for LRU eviction
+	lruElement *list.Element // Pointer to element in LRU list
 }
 
 // Handler is an integrated reverse proxy that performs authorization checks inline
@@ -45,7 +45,7 @@ type Handler struct {
 	cfg              *config.Config
 	authzHandler     *authz.Handler
 	proxies          map[string]*cachedProxy
-	proxiesLRU       *list.List  // LRU list for cache eviction
+	proxiesLRU       *list.List // LRU list for cache eviction
 	proxiesMu        sync.RWMutex
 	challengePageDir string
 	circuitBreakers  *circuitbreaker.Manager
@@ -96,7 +96,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run authorization check inline
-	decision, statusCode, cookies := h.checkAuthorization(r)
+	decision, statusCode, cookies, wsLeaseHeader := h.checkAuthorization(r)
 
 	// Propagate any cookies from authz (clearance cookies)
 	for _, cookie := range cookies {
@@ -123,7 +123,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "allow":
 		metrics.AuthzDecision.WithLabelValues("allow").Inc()
 		// Proxy to origin
-		h.proxyToOrigin(w, r, origin)
+		h.proxyToOrigin(w, r, origin, wsLeaseHeader)
 		return
 
 	default:
@@ -136,8 +136,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) isChallengePage(path string) bool {
 	challengePath := h.cfg.Proxy.ChallengePath
 	return path == challengePath ||
-		   path == challengePath+"/" ||
-		   strings.HasPrefix(path, challengePath+"/")
+		path == challengePath+"/" ||
+		strings.HasPrefix(path, challengePath+"/")
 }
 
 // matchRoute finds the appropriate origin for the request
@@ -172,8 +172,8 @@ func (h *Handler) matchRoute(r *http.Request) string {
 	return ""
 }
 
-// checkAuthorization runs the authorization logic and returns the decision and any cookies
-func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCode int, cookies []*http.Cookie) {
+// checkAuthorization runs the authorization logic and returns the decision, any cookies, and WebSocket lease metadata.
+func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCode int, cookies []*http.Cookie, wsLeaseHeader string) {
 	// Create a response recorder to capture authz handler output
 	recorder := &authzRecorder{
 		header:     make(http.Header),
@@ -205,26 +205,35 @@ func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCo
 
 	// Extract cookies from authz response
 	cookies = parseCookies(recorder.header)
+	wsLeaseHeader = recorder.header.Get(authz.WSLeaseHeader)
 
 	// Map status codes to decisions
 	switch recorder.statusCode {
 	case http.StatusOK, http.StatusNoContent: // 200/204 = ALLOW
-		return "allow", http.StatusOK, cookies
+		return "allow", http.StatusOK, cookies, wsLeaseHeader
 	case http.StatusUnauthorized: // 401 = CHALLENGE
-		return "challenge", http.StatusUnauthorized, cookies
+		return "challenge", http.StatusUnauthorized, cookies, wsLeaseHeader
 	case http.StatusForbidden: // 403 = BLOCK
-		return "block", http.StatusForbidden, cookies
+		return "block", http.StatusForbidden, cookies, wsLeaseHeader
 	default:
 		// Fail open or closed based on config
 		if h.cfg.Modes.FailOpen {
-			return "allow", http.StatusOK, cookies
+			return "allow", http.StatusOK, cookies, wsLeaseHeader
 		}
-		return "block", http.StatusForbidden, cookies
+		return "block", http.StatusForbidden, cookies, wsLeaseHeader
 	}
 }
 
 // proxyToOrigin forwards the request to the upstream origin
-func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originURL string) {
+func (h *Handler) proxyToOrigin(w http.ResponseWriter, r *http.Request, originURL string, wsLeaseHeader string) {
+	isWSUpgrade := isWebSocketUpgrade(r)
+	var wsLease *authz.WSLease
+	if isWSUpgrade {
+		wsLease = authz.ParseWSLeaseHeader(wsLeaseHeader)
+		if wsLease != nil {
+			defer h.authzHandler.ReleaseWSLease(wsLease)
+		}
+	}
 	// Check circuit breaker (if enabled)
 	var needsRelease bool
 	if h.cfg.Proxy.CircuitBreaker.Enabled {
@@ -673,7 +682,7 @@ func parseCookie(setCookie string) *http.Cookie {
 // statusCapturingWriter wraps http.ResponseWriter to capture the status code
 type statusCapturingWriter struct {
 	http.ResponseWriter
-	statusCode *int
+	statusCode  *int
 	wroteHeader bool
 }
 

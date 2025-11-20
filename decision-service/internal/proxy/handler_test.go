@@ -63,12 +63,12 @@ func mockConfig() *config.Config {
 			},
 		},
 		Token: config.TokenCfg{
-			Alg: "HS256",
+			Alg:        "HS256",
 			CurrentKID: "testkid",
 			Keys: map[string]string{
 				"testkid": base64.RawURLEncoding.EncodeToString([]byte("supersecretkeythatisatleast16byteslong")),
 			},
-			Issuer: "fastgate-test",
+			Issuer:  "fastgate-test",
 			SkewSec: 0,
 		},
 		Logging: config.LoggingCfg{
@@ -82,7 +82,7 @@ func mockConfig() *config.Config {
 			Enabled:       true,
 			Origin:        "http://example.com", // Default for authz handler, overridden in tests
 			ChallengePath: "/__uam",
-			TimeoutMs: 1000,
+			TimeoutMs:     1000,
 		},
 	}
 	return cfg
@@ -192,6 +192,61 @@ func TestHandler_ServeHTTP_Challenge(t *testing.T) {
 	// Should contain return_url
 	if !strings.Contains(loc, "return_url") {
 		t.Errorf("location %q missing return_url", loc)
+	}
+}
+
+func TestWebSocketLeaseReleasedAfterProxy(t *testing.T) {
+	// Upstream that does NOT upgrade; returns 200 to avoid hijack requirements in tests.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	cfg := mockConfig()
+	cfg.Proxy.Origin = upstream.URL
+	cfg.Modes.Enforce = true
+	cfg.Policy.WSConcurrency.PerIP = 1
+	cfg.Policy.WSConcurrency.PerToken = 0 // focus on IP lease
+
+	kr := mockKeyring(t)
+	authzHandler := authz.NewHandler(cfg, kr)
+	h, err := NewHandler(cfg, authzHandler, ".")
+	if err != nil {
+		t.Fatalf("NewHandler failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+
+	// Attach valid clearance cookie
+	tokenStr, err := kr.Sign("low", cfg.CookieMaxAge())
+	if err != nil {
+		t.Fatalf("failed to sign token: %v", err)
+	}
+	req.AddCookie(&http.Cookie{
+		Name:  cfg.Cookie.Name,
+		Value: tokenStr,
+	})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from proxy, got %d", w.Code)
+	}
+	if body := w.Body.String(); body != "ok" {
+		t.Fatalf("unexpected body: %q", body)
+	}
+
+	// After proxy completes, the WS lease should be released so we can acquire again.
+	clientIP := "ip:192.0.2.1" // httptest default remote addr is 192.0.2.1:1234
+	if ok, cur := authzHandler.WSConcIP.Acquire(clientIP, 1); !ok {
+		t.Fatalf("expected lease to be released; current count=%d", cur)
+	} else {
+		// cleanup to avoid leaking state into other tests
+		authzHandler.WSConcIP.Release(clientIP)
 	}
 }
 
