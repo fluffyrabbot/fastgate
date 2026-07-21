@@ -133,14 +133,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// isChallengePage checks if the request path is for the challenge page
-func (h *Handler) isChallengePage(path string) bool {
-	challengePath := h.cfg.Proxy.ChallengePath
-	return path == challengePath ||
-		path == challengePath+"/" ||
-		strings.HasPrefix(path, challengePath+"/")
-}
-
 // matchRoute finds the appropriate origin for the request
 func (h *Handler) matchRoute(r *http.Request) string {
 	// Simple single-origin mode
@@ -557,14 +549,6 @@ func (h *Handler) GetCircuitBreakers() map[string]*circuitbreaker.CircuitBreaker
 		return nil
 	}
 	return h.circuitBreakers.GetAll()
-}
-
-// serveChallengePage serves the challenge page and its assets using a robust file server.
-func (h *Handler) serveChallengePage(w http.ResponseWriter, r *http.Request) {
-	log.Debug().Str("path", r.URL.Path).Str("dir", h.challengePageDir).Msg("Serving challenge page asset")
-	fs := http.FileServer(http.Dir(h.challengePageDir))
-	stripper := http.StripPrefix(h.cfg.Proxy.ChallengePath, fs)
-	stripper.ServeHTTP(w, r)
 }
 
 // Helper functions

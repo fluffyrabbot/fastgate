@@ -16,6 +16,7 @@ import (
 	"fastgate/decision-service/internal/token"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // mockKeyring creates a keyring for testing
@@ -307,6 +308,171 @@ func TestWebSocketLeaseReleasedAfterProxy(t *testing.T) {
 		t.Fatalf("expected token lease to be released; current count=%d", cur)
 	} else {
 		authzHandler.WSConcTok.Release(tokKey)
+	}
+}
+
+// --- Test helpers for expanded coverage ---
+
+func mockConfigWithCB() *config.Config {
+	cfg := mockConfig()
+	cfg.Proxy.CircuitBreaker.Enabled = true
+	cfg.Proxy.CircuitBreaker.FailureThreshold = 3
+	cfg.Proxy.CircuitBreaker.SuccessThreshold = 2
+	cfg.Proxy.CircuitBreaker.TimeoutSec = 1 // short for tests
+	cfg.Proxy.CircuitBreaker.MinimumRequestThreshold = 2
+	cfg.Proxy.CircuitBreaker.SlidingWindowSec = 10
+	return cfg
+}
+
+// TestHandler_MatchRoute_HostAndPath exercises the (unexported) routing logic via ServeHTTP behavior
+// using different host headers and path patterns in a multi-origin config.
+func TestHandler_MatchRoute_HostAndPath(t *testing.T) {
+	// Two upstreams
+	up1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("origin-one"))
+	}))
+	defer up1.Close()
+
+	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("origin-two"))
+	}))
+	defer up2.Close()
+
+	cfg := mockConfig()
+	cfg.Proxy.Origin = ""
+	cfg.Proxy.Routes = []config.ProxyRoute{
+		{Host: "game.example.com", Origin: up1.URL},
+		{Path: "^/api/", Origin: up2.URL},
+	}
+	cfg.Modes.Enforce = false
+
+	kr := mockKeyring(t)
+	authzH := authz.NewHandler(cfg, kr)
+	h, err := NewHandler(cfg, authzH, ".")
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		host       string
+		path       string
+		wantBody   string
+		wantStatus int
+	}{
+		{"host match", "game.example.com", "/play", "origin-one", 200},
+		{"path match", "shop.example.com", "/api/users", "origin-two", 200},
+		{"no match", "other.example.com", "/foo", "", 404},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path, nil)
+			req.Host = tc.host
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if tc.wantBody != "" && w.Body.String() != tc.wantBody {
+				t.Errorf("body = %q, want %q", w.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestHandler_CircuitBreaker_OpensAndRejects drives a misbehaving upstream past the failure threshold
+// and verifies that the circuit opens and subsequent requests are rejected fast (503) with the
+// correct metric increment.
+func TestHandler_CircuitBreaker_OpensAndRejects(t *testing.T) {
+	metrics.MustRegister()
+
+	failures := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		failures++
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("boom"))
+	}))
+	defer upstream.Close()
+
+	cfg := mockConfigWithCB()
+	cfg.Proxy.Origin = upstream.URL
+	cfg.Modes.Enforce = false // we only care about CB, not authz
+
+	kr := mockKeyring(t)
+	authzH := authz.NewHandler(cfg, kr)
+	h, err := NewHandler(cfg, authzH, ".")
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// Send enough requests to trip the circuit (need MinimumRequestThreshold + FailureThreshold failures)
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest("GET", "/cb-test", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+	}
+
+	// After threshold, the next request should be rejected quickly with 503
+	start := time.Now()
+	req := httptest.NewRequest("GET", "/cb-test", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	elapsed := time.Since(start)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 after circuit open, got %d", w.Code)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("503 response took too long (%v); circuit breaker did not fail fast", elapsed)
+	}
+
+	// Check that ProxyCircuitOpen counter has increased for this origin
+	// (we don't assert exact value because other tests may have touched it)
+	// Just ensure the metric exists and is > 0 for this origin.
+	mfs, _ := prometheus.DefaultGatherer.Gather()
+	for _, mf := range mfs {
+		if mf.GetName() == "fastgate_proxy_circuit_open_total" {
+			for _, m := range mf.Metric {
+				for _, l := range m.Label {
+					if l.GetName() == "origin" && strings.Contains(l.GetValue(), upstream.URL) {
+						if m.Counter.GetValue() == 0 {
+							t.Error("expected ProxyCircuitOpen > 0 for the failing origin")
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestHandler_BodySizeLimit verifies MaxBodySizeMB enforcement before proxying.
+func TestHandler_BodySizeLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream should not be reached when body is too large")
+	}))
+	defer upstream.Close()
+
+	cfg := mockConfig()
+	cfg.Proxy.Origin = upstream.URL
+	cfg.Proxy.MaxBodySizeMB = 1 // 1 MiB limit
+	cfg.Modes.Enforce = false
+
+	kr := mockKeyring(t)
+	authzH := authz.NewHandler(cfg, kr)
+	h, _ := NewHandler(cfg, authzH, ".")
+
+	// Create a request whose Content-Length exceeds the limit
+	bigBody := strings.NewReader(strings.Repeat("x", 2*1024*1024)) // 2 MiB
+	req := httptest.NewRequest("POST", "/upload", bigBody)
+	req.ContentLength = 2 * 1024 * 1024
+	req.Header.Set("Content-Length", "2097152")
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 Request Entity Too Large, got %d", w.Code)
 	}
 }
 

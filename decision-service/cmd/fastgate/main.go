@@ -18,7 +18,6 @@ import (
 	"fastgate/decision-service/internal/authz"
 	"fastgate/decision-service/internal/challenge"
 	"fastgate/decision-service/internal/config"
-	"fastgate/decision-service/internal/entropy"
 	"fastgate/decision-service/internal/httputil"
 	"fastgate/decision-service/internal/intel"
 	"fastgate/decision-service/internal/metrics"
@@ -35,8 +34,7 @@ import (
 )
 
 const (
-	maxJSONBytes    = 4 * 1024  // 4KB body cap for challenge/nonce endpoint
-	maxEntropyBytes = 16 * 1024 // 16KB for challenge/complete with entropy data
+	maxJSONBytes = 4 * 1024 // 4KB body cap for challenge/nonce + challenge/complete endpoints
 )
 
 // System uptime tracking
@@ -637,16 +635,15 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxEntropyBytes) // Allow larger payloads for entropy data
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBytes)
 	defer r.Body.Close()
 
 	type Req struct {
-		ChallengeID string                `json:"challenge_id"`
-		Nonce       string                `json:"nonce"`
-		Solution    uint32                `json:"solution"`
-		ReturnURL   string                `json:"return_url"`
-		UAHints     map[string]any        `json:"ua_hints"`
-		Entropy     *entropy.Profile      `json:"entropy,omitempty"`
+		ChallengeID string         `json:"challenge_id"`
+		Nonce       string         `json:"nonce"`
+		Solution    uint32         `json:"solution"`
+		ReturnURL   string         `json:"return_url"`
+		UAHints     map[string]any `json:"ua_hints"`
 	}
 	var req Req
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -660,17 +657,6 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 	if req.ChallengeID == "" || req.Nonce == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_fields"})
 		return
-	}
-
-	// Validate entropy payload to prevent DoS via unbounded arrays
-	if req.Entropy != nil {
-		const maxAnomalies = 50 // Reasonable upper bound for anomaly counts
-		if len(req.Entropy.Anomalies.Hardware) > maxAnomalies ||
-			len(req.Entropy.Anomalies.Behavioral) > maxAnomalies ||
-			len(req.Entropy.Anomalies.Environment) > maxAnomalies {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too_many_anomalies"})
-			return
-		}
 	}
 
 	retURL := sanitizeReturnURL(req.ReturnURL)
@@ -691,39 +677,9 @@ func handleChallengeComplete(w http.ResponseWriter, r *http.Request, cfg *config
 		return
 	}
 
-	// Success — analyze entropy and issue clearance cookie
-	tier := "low" // Default tier for PoW completion
-
-	// Analyze entropy if provided
-	if req.Entropy != nil {
-		analyzer := entropy.NewAnalyzer()
-		assessment := analyzer.Analyze(req.Entropy)
-
-		if cfg.Logging.Level == "debug" {
-			log.Debug().
-				Float64("bot_score", assessment.BotScore).
-				Float64("confidence", assessment.Confidence).
-				Bool("suspicious", assessment.IsSuspicious).
-				Interface("reasons", assessment.Reasons).
-				Msg("entropy assessment")
-		}
-
-		// Upgrade tier if low bot score and high confidence
-		if !assessment.IsSuspicious && assessment.Confidence >= 0.5 {
-			tier = "medium" // Upgrade to medium for human-like behavior
-		}
-
-		// Downgrade tier if high bot score
-		if assessment.IsBot {
-			tier = "low" // Keep low tier for bot-like behavior
-			if cfg.Logging.Level == "debug" {
-				log.Debug().
-					Float64("bot_score", assessment.BotScore).
-					Interface("reasons", assessment.Reasons).
-					Msg("bot detected")
-			}
-		}
-	}
+	// Success — issue clearance cookie (tier is currently always "low";
+	// future mechanisms such as WebAuthn may produce differentiated tiers)
+	tier := "low"
 
 	tokenStr, err := kr.Sign(tier, cfg.CookieMaxAge())
 	if err != nil {

@@ -223,7 +223,7 @@ This will allow devices to prove attestation without revealing hardware identifi
 After verifying WebAuthn works, FastGate now includes:
 1. ✅ **Phase 1 Complete**: Hardware-backed attestation
 2. ✅ **Phase 2 Complete**: Federated threat intelligence (STIX/TAXII)
-3. ✅ **Phase 3 Complete**: Behavioral entropy fingerprinting
+3. (removed) Phase 3 Behavioral entropy (ineffective; code + false claims deleted)
 4. 🔄 **Phase 4 (Proposed)**: Zero-knowledge proof challenges (research phase)
 
 See `docs/config.md` for configuration options and `docs/runbook.md` for operational guidance on each feature.

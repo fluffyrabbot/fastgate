@@ -34,7 +34,7 @@ Copy `decision-service/config.example.yaml` to your own config and set `FASTGATE
 - `peers: [...]` — List of TAXII peer servers to subscribe to.
 - `auto_publish: true|false` — Automatically share local attack indicators with peers.
 
-**Note:** Behavioral entropy analysis is automatically applied during PoW challenge completion. The entropy analyzer uses hardcoded thresholds (bot_likelihood >= 0.7 triggers challenge tier adjustment, >= 0.9 triggers block). No configuration is needed.
+**Note:** No behavioral entropy / bot-scoring subsystem is active. Current challenge signals are classic heuristics (UA, language, rate, path sensitivity, threat intel when enabled) plus optional WebAuthn hardware attestation.
 
 ## Key rotation
 - Add a new `kid` to `token.keys`, set `current_kid` to the new key, keep the old one for at least cookie TTL, then remove it.
