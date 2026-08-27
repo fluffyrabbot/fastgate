@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,12 @@ type cachedProxy struct {
 	lruElement *list.Element // Pointer to element in LRU list
 }
 
+type compiledRoute struct {
+	host   string
+	path   *regexp.Regexp
+	origin string
+}
+
 // Handler is an integrated reverse proxy that performs authorization checks inline
 type Handler struct {
 	cfg              *config.Config
@@ -50,6 +57,7 @@ type Handler struct {
 	proxiesMu        sync.RWMutex
 	challengePageDir string
 	circuitBreakers  *circuitbreaker.Manager
+	routes           []compiledRoute
 }
 
 // NewHandler creates a new integrated proxy handler
@@ -72,6 +80,18 @@ func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDi
 		SlidingWindowSize:       time.Duration(cfg.Proxy.CircuitBreaker.SlidingWindowSec) * time.Second,
 	}
 	circuitBreakers := circuitbreaker.NewManager(cbConfig)
+	routes := make([]compiledRoute, 0, len(cfg.Proxy.Routes))
+	for index, route := range cfg.Proxy.Routes {
+		path := route.PathRe
+		if path == nil && route.Path != "" {
+			var err error
+			path, err = regexp.Compile(route.Path)
+			if err != nil {
+				return nil, fmt.Errorf("compile proxy route %d path %q: %w", index, route.Path, err)
+			}
+		}
+		routes = append(routes, compiledRoute{host: route.Host, path: path, origin: route.Origin})
+	}
 
 	h := &Handler{
 		cfg:              cfg,
@@ -80,6 +100,7 @@ func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDi
 		proxiesLRU:       list.New(),
 		challengePageDir: challengePageDir,
 		circuitBreakers:  circuitBreakers,
+		routes:           routes,
 	}
 
 	return h, nil
@@ -145,18 +166,18 @@ func (h *Handler) matchRoute(r *http.Request) string {
 	path := r.URL.Path
 
 	// Try to match routes in order
-	for _, route := range h.cfg.Proxy.Routes {
+	for _, route := range h.routes {
 		// Host-based routing (exact match)
-		if route.Host != "" {
-			if host == route.Host {
-				return route.Origin
+		if route.host != "" {
+			if host == route.host {
+				return route.origin
 			}
 		}
 
 		// Path-based routing (regex match)
-		if route.PathRe != nil {
-			if route.PathRe.MatchString(path) {
-				return route.Origin
+		if route.path != nil {
+			if route.path.MatchString(path) {
+				return route.origin
 			}
 		}
 	}

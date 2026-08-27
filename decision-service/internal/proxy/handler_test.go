@@ -13,6 +13,7 @@ import (
 
 	"fastgate/decision-service/internal/authz"
 	"fastgate/decision-service/internal/config"
+	"fastgate/decision-service/internal/metrics"
 	"fastgate/decision-service/internal/token"
 
 	"github.com/gorilla/websocket"
