@@ -148,3 +148,28 @@ func TestFinishRegistrationFailureConsumesChallenge(t *testing.T) {
 		})
 	}
 }
+
+func TestFinishRegistrationRedirectBoundary(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`/\attacker.invalid/path`, "/"},
+		{`/%5Cattacker.invalid/path`, "/"},
+		{`/%5cattacker.invalid/path`, "/"},
+		{`/%2Fattacker.invalid/path`, "/"},
+		{`/%zz`, "/"},
+		{`/dashboard?tab=1`, `/dashboard?tab=1`},
+		{`/safe/%23hash/%3Fquery?x=a%2Bb`, `/safe/%23hash/%3Fquery?x=a%2Bb`},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			h, _, session := completionFixture(t)
+			id := h.Store.Put(session, []byte("synthetic-user"), tc.in)
+			body := syntheticCreation(t, "http://localhost:8080", session.Challenge)
+			w := finishSynthetic(h, id, body)
+			if w.Code != http.StatusFound || w.Header().Get("Location") != tc.want {
+				t.Fatalf("completion: status=%d location=%q", w.Code, w.Header().Get("Location"))
+			}
+			if replay := finishSynthetic(h, id, body); replay.Code != http.StatusBadRequest || len(replay.Result().Cookies()) != 0 {
+				t.Fatalf("replay accepted: %d", replay.Code)
+			}
+		})
+	}
+}

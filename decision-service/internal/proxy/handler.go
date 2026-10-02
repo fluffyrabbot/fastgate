@@ -190,11 +190,10 @@ func (h *Handler) checkAuthorization(r *http.Request) (decision string, statusCo
 	r.Header.Set("X-Original-Method", r.Method)
 	r.Header.Set("X-Original-URI", r.URL.RequestURI())
 
-	// Get client IP from various headers
-	clientIP := getClientIP(r)
-	if clientIP != "" {
-		r.Header.Set("X-Client-IP", clientIP)
-	}
+	// Derive admission identity from the socket and explicitly trusted proxy chain.
+	// Always overwrite the internal header, including when the peer is malformed.
+	clientIP := internalhttp.ClientIPFromHeadersWithTrustedProxies(r, h.cfg.Server.TrustedProxyCIDRs)
+	r.Header.Set("X-Client-IP", clientIP)
 
 	// Check for WebSocket upgrade
 	if isWebSocketUpgrade(r) {
@@ -422,7 +421,7 @@ func (h *Handler) getOrCreateProxy(originURL string) *httputil.ReverseProxy {
 		}
 
 		// Set trusted X-Forwarded-* headers (untrusted ones were deleted earlier)
-		if clientIP := getClientIP(req); clientIP != "" {
+		if clientIP := internalhttp.ClientIPFromHeadersWithTrustedProxies(req, h.cfg.Server.TrustedProxyCIDRs); clientIP != "" {
 			// Append to preserve proxy chain if needed
 			if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
 				req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
@@ -588,39 +587,6 @@ func (r *authzRecorder) WriteHeader(statusCode int) {
 	r.writeOnce.Do(func() {
 		r.statusCode = statusCode
 	})
-}
-
-// getClientIP extracts the client IP from various headers
-func getClientIP(r *http.Request) string {
-	// Try X-Forwarded-For first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the chain
-		parts := strings.Split(xff, ",")
-		ip := strings.TrimSpace(parts[0])
-
-		// Validate it's a real IP address
-		if parsedIP := net.ParseIP(ip); parsedIP != nil {
-			return ip
-		}
-		// Invalid IP in XFF, fall through to RemoteAddr
-	}
-
-	// Try X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		// Validate it's a real IP address
-		if parsedIP := net.ParseIP(xri); parsedIP != nil {
-			return xri
-		}
-		// Invalid IP in X-Real-IP, fall through
-	}
-
-	// Fall back to RemoteAddr
-	ip := r.RemoteAddr
-	// Strip port if present
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
-	}
-	return ip
 }
 
 // isWebSocketUpgrade checks if the request is a WebSocket upgrade

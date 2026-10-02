@@ -122,3 +122,30 @@ uses explicit disposable HTTP settings instead. No live configuration was loaded
 or changed, no image was published, and no host ports were exposed. GitHub had no
 Actions workflows configured at verification time; absent remote checks are not
 reported as a passing CI run.
+
+### Admission and redirect boundary regressions (2026-10-02)
+
+The integrated authorization path now derives client identity using configured
+trusted proxy CIDRs, matching the challenge endpoints. It overwrites incoming
+`X-Client-IP` even when the socket address is invalid; untrusted `X-Forwarded-For`
+and `X-Real-IP` cannot select a new admission bucket. Trusted chains still stop at
+the first untrusted hop and distinct legitimate clients retain separate buckets.
+
+The shared return-path sanitizer rejects literal or decoded backslashes and
+preserves escaped path bytes. This prevents browser interpretation of a returned
+backslash as an external authority and avoids decoding safe `%23`, `%3F` or `%25`
+path bytes into redirect syntax. Ordinary same-origin paths and queries remain
+supported. WebAuthn's atomic consumption and replay behavior are unchanged.
+
+Both original findings were reproduced in disposable tracked-source fixtures.
+Regression tests cover actual authz admission, multi-line/forged/malformed proxy
+chains, IPv6, software-only WebAuthn completion and replay, and escaped redirects.
+The package smoke fixture holds a synthetic WebSocket open while retrying forged
+identities and captures PoW completion `Location` headers without following them.
+Full Go tests, race tests, vet, build and both packaged modes passed. An offline
+WHATWG URL parser check confirmed the original cross-origin interpretation and
+same-origin resolution of the corrected outputs; no external target was contacted.
+
+These checks do not constitute production deployment, real-authenticator or live
+browser navigation evidence. Existing TLS/example-configuration and absent-CI
+limitations above still apply; no live settings or cookie defaults were changed.

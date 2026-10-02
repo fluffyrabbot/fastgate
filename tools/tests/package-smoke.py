@@ -101,12 +101,17 @@ try:
         run('network', 'create', '--internal', network)
         origin = prefix + '-origin'
         # Synthetic origin also runs the HTTP probe. No host listeners or real data.
-        origin_code = '''from http.server import BaseHTTPRequestHandler,HTTPServer
-import json
+        origin_code = '''from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+import base64,hashlib,json
 class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
+  if self.headers.get("Upgrade", "").lower() == "websocket":
+   key=self.headers["Sec-WebSocket-Key"]+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+   self.send_response(101); self.send_header("Upgrade","websocket"); self.send_header("Connection","Upgrade")
+   self.send_header("Sec-WebSocket-Accept",base64.b64encode(hashlib.sha1(key.encode()).digest()).decode())
+   self.end_headers(); self.wfile.flush(); self.rfile.read(1); return
   self.send_response(200); self.end_headers(); self.wfile.write(json.dumps({"synthetic_origin":True,"path":self.path,"headers":dict(self.headers)}).encode())
-HTTPServer(("0.0.0.0",8081),Handler).serve_forever()
+ThreadingHTTPServer(("0.0.0.0",8081),Handler).serve_forever()
 '''
         # Pull before entering the isolated network; only public base image retrieval.
         if run('image', 'inspect', 'docker.io/library/python:3.11-alpine', check=False).returncode:
@@ -119,7 +124,7 @@ HTTPServer(("0.0.0.0",8081),Handler).serve_forever()
                   'cookie': {'name': 'Clearance', 'path': '/', 'max_age_sec': 3600, 'same_site': 'Lax', 'secure': False, 'http_only': True},
                   'token': {'alg': 'HS256', 'issuer': 'package-smoke', 'keys': {'fixture': secret}, 'current_kid': 'fixture'},
                   'cluster': {'secret_key': secret},
-                  'policy': {'challenge_threshold': 50, 'block_threshold': 100, 'paths': [{'pattern': '^/protected', 'base': 60}]},
+                  'policy': {'ws_concurrency_limits': {'per_ip': 1}, 'challenge_threshold': 50, 'block_threshold': 100, 'paths': [{'pattern': '^/protected', 'base': 60}]},
                   'challenge': {'difficulty_bits': 12, 'ttl_sec': 60, 'nonce_rps_limit': 100},
                   'webauthn': {'enabled': False}, 'threat_intel': {'enabled': False},
                   'proxy': {'enabled': True, 'mode': 'integrated', 'origin': f'http://{origin}:8081', 'challenge_path': '/__uam'}}
@@ -151,6 +156,30 @@ HTTPServer(("0.0.0.0",8081),Handler).serve_forever()
                 assert response[2] == (context / 'challenge-page' / (asset or 'index.html')).read_text()
             assert request(app, '/__uam/missing.js')[0] == 404
             assert request(app, '/protected')[0] == 302
+            # Hold one real, synthetic WebSocket open and try forged identities.
+            # All sockets stay on this disposable internal container network.
+            ws_probe = r'''import base64,os,socket,sys
+host=sys.argv[1]
+sockets=[]
+def handshake(extra):
+ s=socket.create_connection((host,8080),timeout=4); sockets.append(s)
+ message="GET /ws HTTP/1.1\r\nHost: "+host+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: "+base64.b64encode(os.urandom(16)).decode()+"\r\nUser-Agent: Mozilla/5.0\r\nAccept-Language: en\r\n"+extra+"\r\n"
+ s.sendall(message.encode()); response=b""
+ while b"\r\n\r\n" not in response:
+  chunk=s.recv(4096)
+  assert chunk, "socket closed before handshake response"
+  response+=chunk
+ return int(response.split()[1])
+try:
+ assert handshake("")==101
+ for extra in ("", "X-Forwarded-For: 203.0.113.99\r\n", "X-Real-IP: 203.0.113.98\r\n", "X-Client-IP: 203.0.113.97\r\n", "X-Forwarded-For: garbage\r\n"):
+  assert handshake(extra)==302, "forged header bypassed admission: "+extra
+finally:
+ for s in sockets: s.close()
+'''
+            run('exec', origin, 'python', '-c', ws_probe, app)
+            print('PASS: held WebSocket admission cannot be bypassed by forged or malformed IP headers.', flush=True)
+
             spoof = {'X-Forwarded-For': '203.0.113.99', 'X-Client-IP': '203.0.113.99'}
             status, _, body = request(app, '/v1/challenge/nonce', {'return_url': '/protected'}, spoof)
             assert status == 200
@@ -166,6 +195,18 @@ HTTPServer(("0.0.0.0",8081),Handler).serve_forever()
                 'solution': solution, 'return_url': '/protected'}, {'X-Forwarded-For': '198.51.100.2'})
             assert status == 302 and headers['Location'] == '/protected'
             cookie = headers['Set-Cookie'].split(';')[0]
+            for supplied, expected in ((r'/\attacker.invalid/path', '/'),
+                                       ('/%5Cattacker.invalid/path', '/'),
+                                       ('/%2fattacker.invalid/path', '/'),
+                                       ('/%zz', '/'),
+                                       ('/safe/%23hash/%3Fquery?x=a%2Bb', '/safe/%23hash/%3Fquery?x=a%2Bb')):
+                # NoRedirect captures Location without navigating anywhere.
+                status, redirected, _ = request(app, '/v1/challenge/complete', {
+                    'challenge_id': nonce['challenge_id'], 'nonce': nonce['nonce'],
+                    'solution': solution, 'return_url': supplied})
+                assert status == 302 and redirected['Location'] == expected
+            print('PASS: PoW completion rejects external/malformed paths and preserves safe escaping.', flush=True)
+
             status, _, body = request(app, '/protected', headers={'Cookie': cookie, **spoof})
             assert status == 200 and json.loads(body)['synthetic_origin']
             for path in ('/metrics', '/admin/stats'):

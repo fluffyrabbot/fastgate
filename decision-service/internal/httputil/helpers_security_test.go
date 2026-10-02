@@ -28,3 +28,33 @@ func TestForwardedIPTrustBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestSanitizeReturnURLBrowserPaths(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`/\attacker.invalid/path`, "/"},
+		{`/%5Cattacker.invalid/path`, "/"},
+		{`/%5cattacker.invalid/path`, "/"},
+		{`/safe\path`, "/"},
+		{`/%2fattacker.invalid/path`, "/"},
+		{`//attacker.invalid/path`, "/"},
+		{`https://attacker.invalid/path`, "/"},
+		{`/%zz`, "/"},
+		{`/safe/%20space/%23hash/%3Fquery/%25percent?x=a%2Bb&y=c+d`, `/safe/%20space/%23hash/%3Fquery/%25percent?x=a%2Bb&y=c+d`},
+		{`/safe+path?next=%2Fhome`, `/safe+path?next=%2Fhome`},
+		{`/%255Cattacker.invalid/path`, `/%255Cattacker.invalid/path`},
+		{`/%0A/attacker.invalid/path`, `/%0A/attacker.invalid/path`},
+		{`/dashboard?tab=1`, `/dashboard?tab=1`},
+		{`/`, `/`},
+		{``, `/`},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			got := SanitizeReturnURL(tc.in)
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+			if again := SanitizeReturnURL(got); again != got {
+				t.Fatalf("second sanitization changed %q to %q", got, again)
+			}
+		})
+	}
+}

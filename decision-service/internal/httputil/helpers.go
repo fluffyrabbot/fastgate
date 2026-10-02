@@ -133,7 +133,10 @@ func SanitizeReturnURL(in string) string {
 	}
 
 	// Check decoded version for attack patterns
-	if strings.Contains(decoded, "://") ||
+	// Browsers treat backslashes as slashes in special-scheme URLs. Reject them
+	// after decoding so an encoded backslash cannot create an external authority.
+	if strings.Contains(decoded, `\`) ||
+		strings.Contains(decoded, "://") ||
 		strings.HasPrefix(decoded, "//") ||
 		strings.HasPrefix(decoded, "http://") ||
 		strings.HasPrefix(decoded, "https://") {
@@ -155,8 +158,9 @@ func SanitizeReturnURL(in string) string {
 		return "/"
 	}
 
-	// Keep path + raw query; drop fragments (browsers keep them client-side anyway)
-	out := u.Path
+	// Preserve path escaping: decoded separators, controls and percent signs must
+	// not gain URL syntax when emitted in Location or sanitized a second time.
+	out := u.EscapedPath()
 	if u.RawQuery != "" {
 		out += "?" + u.RawQuery
 	}
