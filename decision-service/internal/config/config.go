@@ -184,7 +184,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8080"
 	}
-	// Parse trusted proxy CIDR ranges
+	// Parse trusted proxy CIDR ranges. Empty means trust only the socket peer.
 	for _, cidr := range cfg.Server.TrustedProxies {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
