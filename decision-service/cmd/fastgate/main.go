@@ -196,8 +196,14 @@ func main() {
 			challengePageDir = "./challenge-page"
 		}
 
+		// Validate assets where they are served, before starting the listener.
+		challengeFS, err := newChallengeAssets(challengePageDir)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to create challenge asset handler")
+		}
+
 		// Create integrated proxy handler
-		ph, err := proxy.NewHandler(cfg, authzHandler, challengePageDir)
+		ph, err := proxy.NewHandler(cfg, authzHandler)
 		if err != nil {
 			log.Fatal().Err(err).Msg("failed to create proxy handler")
 		}
@@ -230,7 +236,6 @@ func main() {
 		mux := http.NewServeMux()
 
 		// Serve challenge page assets directly, bypassing authz
-		challengeFS := http.FileServer(http.Dir(challengePageDir))
 		mux.Handle(cfg.Proxy.ChallengePath+"/", http.StripPrefix(cfg.Proxy.ChallengePath, challengeFS))
 
 		// Challenge endpoints (for PoW and WebAuthn challenges)
@@ -724,6 +729,18 @@ func Chain(middlewares ...Middleware) Middleware {
 		}
 		return final
 	}
+}
+
+// newChallengeAssets owns both startup validation and static file serving.
+func newChallengeAssets(directory string) (http.Handler, error) {
+	info, err := os.Stat(directory)
+	if err != nil {
+		return nil, fmt.Errorf("challenge page directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("challenge page path is not a directory: %s", directory)
+	}
+	return http.FileServer(http.Dir(directory)), nil
 }
 
 // Reserve these routes so the integrated origin catch-all cannot expose them.

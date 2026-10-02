@@ -113,8 +113,7 @@ func TestHandler_ServeHTTP_ProxyToOrigin(t *testing.T) {
 	authzHandler := authz.NewHandler(cfg, kr)
 
 	// 4. Setup Proxy Handler
-	// We need a dummy challenge directory
-	h, err := NewHandler(cfg, authzHandler, ".")
+	h, err := NewHandler(cfg, authzHandler)
 	if err != nil {
 		t.Fatalf("NewHandler failed: %v", err)
 	}
@@ -152,7 +151,7 @@ func TestHandler_ServeHTTP_Block(t *testing.T) {
 	authzHandler := authz.NewHandler(cfg, kr)
 
 	// 4. Setup Proxy Handler
-	h, _ := NewHandler(cfg, authzHandler, ".")
+	h, _ := NewHandler(cfg, authzHandler)
 
 	// 5. Perform Request (Triggers block: missing UA, etc.)
 	req := httptest.NewRequest("GET", "/", nil)
@@ -180,7 +179,7 @@ func TestHandler_ServeHTTP_Challenge(t *testing.T) {
 
 	kr := mockKeyring(t)
 	authzHandler := authz.NewHandler(cfg, kr)
-	h, _ := NewHandler(cfg, authzHandler, ".")
+	h, _ := NewHandler(cfg, authzHandler)
 
 	// 2. Perform Request (Triggers challenge)
 	req := httptest.NewRequest("GET", "/app", nil)
@@ -240,7 +239,7 @@ func TestWebSocketLeaseReleasedAfterProxy(t *testing.T) {
 
 	kr := mockKeyring(t)
 	authzHandler := authz.NewHandler(cfg, kr)
-	h, err := NewHandler(cfg, authzHandler, ".")
+	h, err := NewHandler(cfg, authzHandler)
 	if err != nil {
 		t.Fatalf("NewHandler failed: %v", err)
 	}
@@ -349,7 +348,7 @@ func TestHandler_MatchRoute_HostAndPath(t *testing.T) {
 
 	kr := mockKeyring(t)
 	authzH := authz.NewHandler(cfg, kr)
-	h, err := NewHandler(cfg, authzH, ".")
+	h, err := NewHandler(cfg, authzH)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -402,7 +401,7 @@ func TestHandler_CircuitBreaker_OpensAndRejects(t *testing.T) {
 
 	kr := mockKeyring(t)
 	authzH := authz.NewHandler(cfg, kr)
-	h, err := NewHandler(cfg, authzH, ".")
+	h, err := NewHandler(cfg, authzH)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -461,7 +460,7 @@ func TestHandler_BodySizeLimit(t *testing.T) {
 
 	kr := mockKeyring(t)
 	authzH := authz.NewHandler(cfg, kr)
-	h, _ := NewHandler(cfg, authzH, ".")
+	h, _ := NewHandler(cfg, authzH)
 
 	// Create a request whose Content-Length exceeds the limit
 	bigBody := strings.NewReader(strings.Repeat("x", 2*1024*1024)) // 2 MiB

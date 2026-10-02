@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -50,25 +49,19 @@ type compiledRoute struct {
 
 // Handler is an integrated reverse proxy that performs authorization checks inline
 type Handler struct {
-	cfg              *config.Config
-	authzHandler     *authz.Handler
-	proxies          map[string]*cachedProxy
-	proxiesLRU       *list.List // LRU list for cache eviction
-	proxiesMu        sync.RWMutex
-	challengePageDir string
-	circuitBreakers  *circuitbreaker.Manager
-	routes           []compiledRoute
+	cfg             *config.Config
+	authzHandler    *authz.Handler
+	proxies         map[string]*cachedProxy
+	proxiesLRU      *list.List // LRU list for cache eviction
+	proxiesMu       sync.RWMutex
+	circuitBreakers *circuitbreaker.Manager
+	routes          []compiledRoute
 }
 
 // NewHandler creates a new integrated proxy handler
-func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDir string) (*Handler, error) {
+func NewHandler(cfg *config.Config, authzHandler *authz.Handler) (*Handler, error) {
 	if !cfg.Proxy.Enabled {
 		return nil, fmt.Errorf("proxy mode not enabled in config")
-	}
-
-	// Validate challenge page directory exists
-	if _, err := os.Stat(challengePageDir); os.IsNotExist(err) {
-		return nil, fmt.Errorf("challenge page directory does not exist: %s", challengePageDir)
 	}
 
 	// Initialize circuit breaker manager
@@ -94,13 +87,12 @@ func NewHandler(cfg *config.Config, authzHandler *authz.Handler, challengePageDi
 	}
 
 	h := &Handler{
-		cfg:              cfg,
-		authzHandler:     authzHandler,
-		proxies:          make(map[string]*cachedProxy),
-		proxiesLRU:       list.New(),
-		challengePageDir: challengePageDir,
-		circuitBreakers:  circuitBreakers,
-		routes:           routes,
+		cfg:             cfg,
+		authzHandler:    authzHandler,
+		proxies:         make(map[string]*cachedProxy),
+		proxiesLRU:      list.New(),
+		circuitBreakers: circuitBreakers,
+		routes:          routes,
 	}
 
 	return h, nil
