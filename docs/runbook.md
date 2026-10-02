@@ -1,19 +1,35 @@
 # FastGate — Runbook
 
 ## Local quickstart
-```bash
-cd deploy
-docker compose up --build
-```
 
-Visit http://localhost:8088/ — first request should set a `Clearance` cookie.
-Try hitting `/login` or set a headless UA to see a challenge:
+From the repository root, with Python 3 and an already running local Podman or
+Docker, run the disposable package checks without preparing runtime configuration:
 
 ```bash
-curl -i -A "curl/8.0" http://localhost:8088/login
+python3 tools/tests/package-smoke.py --engine podman
+# Or: python3 tools/tests/package-smoke.py --engine docker
 ```
 
-You should see a `302` to `/__uam?u=/login`.
+See [local container package verification](#local-container-package-verification)
+for prerequisites, scope and cleanup. The fixture generates synthetic HTTP
+settings inside an isolated network; it does not configure a deployment.
+
+### Runtime configuration prerequisite
+
+The [example configuration](../decision-service/config.example.yaml) is not
+runnable unchanged. It enables enforcement and secure cookies but omits TLS.
+Startup validation requires `server.tls_enabled: true` with `tls_cert_file` and
+`tls_key_file`; serving TLS additionally requires the referenced certificate/key
+files. Upstream TLS termination alone does not satisfy this validation rule.
+Keep enforcement and secure cookies enabled, and provide operator-supplied trusted
+certificates and matching HTTPS settings in your own runtime configuration.
+
+The supplied [Compose file](../deploy/docker-compose.yaml) loads that example
+without a runtime override or certificate mounts. Its NGINX listener and upstream
+to the decision service use HTTP. Therefore `docker compose up --build` does not
+provide a working HTTP clearance flow unchanged. Configuring
+runtime mounts and compatible HTTPS listeners/upstreams is a deployment step;
+this runbook does not select certificate provisioning or mount policy.
 
 ## Under Attack
 Set `under_attack: true` to bias scoring up (more challenges) without changing path rules.

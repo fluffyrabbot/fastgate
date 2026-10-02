@@ -5,11 +5,31 @@ challenges the risky tail, and supports HTTP + WebSocket handshakes.
 
 ## Quickstart
 
+For local package checks without preparing runtime configuration, use Python 3
+and an already running local Podman or Docker, from the repository root:
+
+```bash
+python3 tools/tests/package-smoke.py --engine podman
+# Or: python3 tools/tests/package-smoke.py --engine docker
+```
+
+The fixture generates disposable settings and tests both modes on an internal
+container network without publishing ports. See the [runbook](docs/runbook.md#local-container-package-verification)
+for prerequisites and limits. It is not a deployment recipe.
+
+The [example configuration](decision-service/config.example.yaml) is a reference
+that fails startup validation unchanged: enforcement and secure cookies require
+FastGate's own TLS listener and certificate/key paths. Upstream TLS termination
+alone does not satisfy this requirement. Preserve these defaults and prepare
+operator-supplied certificates, keys, origin and HTTPS settings before startup.
+
 ### Option 1: Integrated Proxy Mode (Recommended for simplicity)
 
 **Single binary, zero NGINX dependency**
 
-1. Create `config.yaml`:
+1. Prepare your runtime configuration from the example above, including TLS and
+certificate paths. The following is a **partial routing/configuration illustration**,
+not a complete runnable configuration; replace its placeholder key:
 ```yaml
 version: v1
 server:
@@ -33,14 +53,14 @@ policy:
   block_threshold: 85
 ```
 
-2. Run FastGate:
+2. Once the runtime configuration and trusted certificates are ready, run from
+   the repository root, substituting your configuration's absolute path:
 ```bash
 cd decision-service
-go run ./cmd/fastgate
-# FastGate listening on :8080, proxying to your app
+CHALLENGE_PAGE_DIR=../challenge-page go run ./cmd/fastgate -config /absolute/path/to/runtime.yaml
 ```
 
-That's it! FastGate now sits in front of your application at port 8080.
+Use the HTTPS address matching your certificate and configured listener.
 
 **Multi-origin routing example** (game + shop):
 ```yaml
@@ -57,16 +77,14 @@ proxy:
 
 **For advanced deployments requiring NGINX features**
 
-```bash
-cd deploy
-docker compose up --build
-# NGINX: http://localhost:8088/
-```
+The supplied [Compose topology](deploy/docker-compose.yaml) is not a working
+secure quickstart unchanged. It loads the unprepared example configuration and
+uses HTTP for NGINX's listener and decision-service upstream. A deployment needs
+an explicitly configured runtime file, certificate mounts, and compatible HTTPS
+listeners/upstreams. Those deployment choices are not supplied by this example.
 
-First request sets a `Clearance` cookie and proxies to the origin.
-Headless clients and high-risk paths (e.g., `/login`) are challenged.
-
-See `docs/config.md` and `docs/runbook.md` for details.
+Use the disposable smoke command above to verify NGINX routing locally. See
+[configuration](docs/config.md) and the [runbook](docs/runbook.md) for details.
 
 ## Observability
 

@@ -1,3 +1,11 @@
+# Configuration reference: prepare a runtime configuration before use.
+# With enforce: true and cookie.secure: true, startup requires TLS enabled
+# (server.tls_enabled: true) and tls_cert_file/tls_key_file for your certificates.
+# TLS is not configured below; the unchanged example fails startup validation.
+# Upstream TLS termination alone does not satisfy that validation requirement.
+# Keep enforcement and secure cookies enabled; supply trusted certificates and a
+# matching browser-facing HTTPS origins in your runtime configuration. Do not bake keys or
+# certificates into the image. See docs/runbook.md for disposable local checks.
 version: v1
 
 server:
