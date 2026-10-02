@@ -70,17 +70,19 @@ See `docs/config.md` and `docs/runbook.md` for details.
 
 ## Observability
 
-FastGate includes a lightweight, built-in **Admin Dashboard** (Integrated Mode only) for real-time monitoring.
+Operator data is disabled on the public visitor listener, including for valid
+clearance cookies. Enable a separate local listener explicitly:
 
-- **Dashboard:** `http://<host>/__uam/dashboard.html`
-- **JSON Stats:** `http://<host>/admin/stats`
-- **Prometheus:** `http://<host>/metrics`
+```bash
+./fastgate -config config.yaml -operator-listen 127.0.0.1:9091
+```
 
-The dashboard visualizes:
-- Real-time allow/block/challenge rates
-- Challenge solver success rates (PoW)
-- WebAuthn statistics
-- System health and proxy errors
+- **JSON Stats:** `http://127.0.0.1:9091/admin/stats`
+- **Prometheus:** `http://127.0.0.1:9091/metrics`
+
+Only literal loopback addresses are accepted; the listener is disabled by default.
+Do not publicly reverse-proxy it. The retired public dashboard has been removed;
+operator clients can consume these local JSON/Prometheus endpoints.
 
 ## Architecture
 
@@ -89,8 +91,6 @@ The dashboard visualizes:
 Client → FastGate (:8080) → Your App
          ↓
       Stateless JWE Challenge
-         &
-      Admin Dashboard
 ```
 
 ### Sovereign Mesh

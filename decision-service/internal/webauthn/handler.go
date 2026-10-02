@@ -81,7 +81,9 @@ func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
 	defer r.Body.Close()
 
-	type Req struct{ ReturnURL string `json:"return_url"` }
+	type Req struct {
+		ReturnURL string `json:"return_url"`
+	}
 	var req Req
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
@@ -128,7 +130,6 @@ func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, resp)
 }
-
 
 // FinishRegistration completes a WebAuthn registration ceremony.
 // POST /v1/challenge/complete/webauthn
@@ -245,10 +246,6 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, httputil.BuildCookie(h.Config, tokenStr))
 
 	returnURL = sanitizeReturnURL(returnURL)
-	if returnURL == "" || returnURL == "/" {
-		// Redirect to test success page if no specific return URL
-		returnURL = "/test/success"
-	}
 
 	log.Printf("webauthn: registration complete - redirecting to %s", returnURL)
 

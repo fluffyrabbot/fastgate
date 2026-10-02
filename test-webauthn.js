@@ -150,15 +150,14 @@ async function testWebAuthn() {
     // Wait for either success (redirect) or error
     const result = await Promise.race([
       // Wait for redirect (success case)
-      page.waitForURL('http://localhost:8080/test/success', { timeout: 15000 })
+      page.waitForURL('http://localhost:8080/', { timeout: 15000 })
         .then(async () => {
-          // Verify we're actually on the success page
-          const pageTitle = await page.title();
-          const hasSuccess = await page.locator('text=Authenticated').count() > 0 ||
-                            await page.locator('text=FastGate').count() > 0;
+          // The protected test origin, not a gateway debug page, owns success UI.
+          const cookies = await context.cookies();
+          const cleared = cookies.some(cookie => cookie.name === 'Clearance' && cookie.value);
           return {
-            success: true,
-            message: `Successfully authenticated and redirected! (Page: ${pageTitle})`
+            success: cleared,
+            message: cleared ? 'Redirected to the origin with clearance.' : 'Origin redirect lacked clearance.'
           };
         })
         .catch(() => null),

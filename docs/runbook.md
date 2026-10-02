@@ -24,9 +24,9 @@ Set `under_attack: true` to bias scoring up (more challenges) without changing p
 
 ## Health & metrics
 - `GET /healthz` and `/readyz` on the decision service return 200.
-- `GET /admin/stats` returns a JSON summary of key metrics (Integrated Mode only).
-- **Admin Dashboard**: Accessible at `/__uam/dashboard.html` (e.g., http://localhost:8080/__uam/dashboard.html).
-- `GET /metrics` exposes Prometheus metrics:
+- Start with `-operator-listen 127.0.0.1:9091` to enable local operator access. It is disabled by default and accepts only literal loopback bind addresses; never publicly reverse-proxy it.
+- `GET /admin/stats` on that separate listener returns a JSON metrics summary in either mode. Public visitor requests to this endpoint and `/metrics` return 404, regardless of clearance.
+- `GET /metrics` on the operator listener exposes Prometheus metrics:
   - `fastgate_authz_decision_total{action}`
   - `fastgate_clearance_issued_total`
   - `fastgate_challenge_*_total`

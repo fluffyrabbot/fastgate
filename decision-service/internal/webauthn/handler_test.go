@@ -203,6 +203,7 @@ func TestBeginRegistration_ReturnURLSanitization(t *testing.T) {
 		{"absolute URL", "http://evil.com", "/"},
 		{"encoded protocol relative", "%2F%2Fevil.com", "/"},
 		{"empty string", "", "/"},
+		{"origin root", "/", "/"},
 		{"query params", "/dashboard?foo=bar", "/dashboard?foo=bar"},
 	}
 
