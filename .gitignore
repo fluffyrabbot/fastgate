@@ -1,5 +1,5 @@
 # Binaries
-fastgate
+/fastgate
 decision-service/fastgate
 
 # Runtime configuration

@@ -44,7 +44,7 @@ server:
     - "172.16.0.0/12"    # Load balancer subnet
 ```
 
-**Without this configuration**, attackers can spoof `X-Forwarded-For` headers to bypass rate limiting.
+**Without this configuration**, forwarded headers are ignored and rate limiting uses the socket peer. Behind a proxy this groups clients under that proxy IP; configure only trusted proxy addresses to recover individual client IPs.
 
 #### Finding Your Proxy IPs
 
@@ -362,3 +362,17 @@ Include:
 - [WebAuthn Specification](https://www.w3.org/TR/webauthn-2/)
 - [STIX/TAXII 2.1](https://oasis-open.github.io/cti-documentation/)
 - [Proof-of-Work Best Practices](https://tools.ietf.org/html/rfc8374)
+
+## Operator observability boundary
+
+`/metrics` and `/admin/stats` return 404 on the visitor listener in both proxy
+modes, including for valid clearance cookies. Operators may explicitly enable a
+separate loopback listener with `-operator-listen 127.0.0.1:9091` (disabled by
+default). Only literal loopback addresses are accepted. Access is granted by local
+network access, not by visitor tokens. Do not forward this listener through a
+public reverse proxy; use existing host access controls for local scraping.
+
+An empty `server.trusted_proxies` list now trusts no forwarded headers. Configure
+only actual proxy CIDRs when deploying behind a proxy. X-Forwarded-For is walked
+right-to-left from the socket peer and stops at the first untrusted hop; prefixes
+supplied by an untrusted client cannot override that client's address.

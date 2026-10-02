@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -43,7 +44,11 @@ var startTime = time.Now()
 func main() {
 	// CLI flag support for config path
 	configFlag := flag.String("config", "", "path to config file (overrides FASTGATE_CONFIG env var)")
+	operatorListen := flag.String("operator-listen", "", "optional loopback-only operator listener, e.g. 127.0.0.1:9091")
 	flag.Parse()
+	if err := validateOperatorListen(*operatorListen); err != nil {
+		log.Fatal().Err(err).Msg("invalid operator listener")
+	}
 
 	// Determine config path: CLI flag > env var > default
 	cfgPath := *configFlag
@@ -261,11 +266,7 @@ func main() {
 			handleReadiness(w, r, proxyHandler, intelStore, webauthnHandler, cfg)
 		}))
 		metrics.MustRegister()
-		// Metrics endpoint - requires valid clearance token for security
-		mux.Handle("/metrics", requireAuth(kr, cfg, promhttp.Handler()))
-
-		// Admin stats endpoint for dashboard - requires valid clearance token
-		mux.Handle("/admin/stats", requireAuth(kr, cfg, http.HandlerFunc(handleAdminStats)))
+		denyPublicOperatorEndpoints(mux)
 
 		// Proxy handler for all other requests
 		mux.Handle("/", proxyHandler)
@@ -326,11 +327,7 @@ func main() {
 			handleReadiness(w, r, nil, intelStore, webauthnHandler, cfg)
 		}))
 		metrics.MustRegister()
-		// Metrics endpoint - requires valid clearance token for security
-		mux.Handle("/metrics", requireAuth(kr, cfg, promhttp.Handler()))
-
-		// Admin stats endpoint for dashboard - requires valid clearance token
-		mux.Handle("/admin/stats", requireAuth(kr, cfg, http.HandlerFunc(handleAdminStats)))
+		denyPublicOperatorEndpoints(mux)
 
 		// Apply middleware chain: request ID (with trusted proxies) → common headers
 		handler = Chain(
@@ -358,7 +355,12 @@ func main() {
 	}
 
 	// Graceful shutdown setup
-	serverErrors := make(chan error, 1)
+	serverErrors := make(chan error, 2)
+	var operatorServer *http.Server
+	if *operatorListen != "" {
+		operatorServer = &http.Server{Addr: *operatorListen, Handler: operatorHandler(), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
+		go func() { serverErrors <- operatorServer.ListenAndServe() }()
+	}
 	go func() {
 		log.Info().
 			Str("listen", cfg.Server.Listen).
@@ -427,6 +429,12 @@ func main() {
 			log.Debug().Msg("shutting down proxy handler")
 			if err := proxyHandler.Shutdown(ctx); err != nil {
 				log.Error().Err(err).Msg("proxy shutdown error")
+			}
+		}
+
+		if operatorServer != nil {
+			if err := operatorServer.Shutdown(ctx); err != nil {
+				operatorServer.Close()
 			}
 		}
 
@@ -723,43 +731,34 @@ func Chain(middlewares ...Middleware) Middleware {
 	}
 }
 
-// requireAuth wraps an http.Handler and requires a valid clearance token
-// This is used to protect sensitive endpoints like /metrics and /admin/stats
-func requireAuth(kr *token.Keyring, cfg *config.Config, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logger := httputil.GetLogger(r.Context())
+// Reserve these routes so the integrated origin catch-all cannot expose them.
+func denyPublicOperatorEndpoints(mux *http.ServeMux) {
+	mux.Handle("/metrics", http.NotFoundHandler())
+	mux.Handle("/admin/stats", http.NotFoundHandler())
+}
 
-		// Check for clearance cookie
-		cookie, err := r.Cookie(cfg.Cookie.Name)
-		if err != nil {
-			logger.Warn().
-				Str("path", r.URL.Path).
-				Str("client_ip", clientIPFromHeaders(r)).
-				Msg("metrics/admin endpoint accessed without authentication")
-			http.Error(w, "Authentication required", http.StatusUnauthorized)
-			return
-		}
+// validateOperatorListen requires a literal loopback address. No forwarded header
+// or visitor credential can grant operator access on the public listener.
+func validateOperatorListen(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("operator listener must use a literal loopback IP")
+	}
+	return nil
+}
 
-		// Verify token (no minimum time left required for admin endpoints)
-		claims, _, err := kr.Verify(cookie.Value, 0)
-		if err != nil {
-			logger.Warn().
-				Str("path", r.URL.Path).
-				Str("client_ip", clientIPFromHeaders(r)).
-				Err(err).
-				Msg("metrics/admin endpoint accessed with invalid token")
-			http.Error(w, "Invalid authentication", http.StatusUnauthorized)
-			return
-		}
-
-		// Log successful access for audit trail
-		logger.Debug().
-			Str("path", r.URL.Path).
-			Str("tier", claims.Tier).
-			Msg("authenticated access to admin/metrics endpoint")
-
-		next.ServeHTTP(w, r)
-	})
+func operatorHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/admin/stats", handleAdminStats)
+	return withCommonHeaders(mux)
 }
 
 func withCommonHeaders(next http.Handler) http.Handler {
@@ -794,10 +793,10 @@ var (
 // responseRecorder for observe mode in /v1/authz wrapper.
 type responseRecorder struct{ h http.Header }
 
-func newResponseRecorder() *responseRecorder                  { return &responseRecorder{h: make(http.Header)} }
-func (r *responseRecorder) Header() http.Header               { return r.h }
-func (r *responseRecorder) Write(b []byte) (int, error)       { return len(b), nil }
-func (r *responseRecorder) WriteHeader(statusCode int)        {}
+func newResponseRecorder() *responseRecorder            { return &responseRecorder{h: make(http.Header)} }
+func (r *responseRecorder) Header() http.Header         { return r.h }
+func (r *responseRecorder) Write(b []byte) (int, error) { return len(b), nil }
+func (r *responseRecorder) WriteHeader(statusCode int)  {}
 
 // handleHealth returns detailed component health status
 // handleTestSuccess shows authentication success page for testing without requiring origin
@@ -1101,7 +1100,7 @@ func handleLiveness(w http.ResponseWriter, r *http.Request) {
 // Returns 503 if all circuit breakers are open (no healthy backends)
 func handleReadiness(w http.ResponseWriter, r *http.Request, ph *proxy.Handler, is *intel.Store, wh *webauthn.Handler, cfg *config.Config) {
 	type ComponentHealth struct {
-		Status  string `json:"status"`  // "ok" | "degraded" | "down"
+		Status  string `json:"status"` // "ok" | "degraded" | "down"
 		Details string `json:"details,omitempty"`
 	}
 
