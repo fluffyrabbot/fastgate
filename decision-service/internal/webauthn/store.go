@@ -91,9 +91,9 @@ func (s *Store) Put(session *webauthn.SessionData, userID []byte, returnURL stri
 	return id
 }
 
-// Get retrieves a WebAuthn session by challenge ID.
-// Returns (session, userID, returnURL, found).
-func (s *Store) Get(id string) (*webauthn.SessionData, []byte, string, bool) {
+// Take atomically removes and returns an unexpired challenge session.
+// A challenge is consumed before verification, including when verification fails.
+func (s *Store) Take(id string) (*webauthn.SessionData, []byte, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -101,31 +101,13 @@ func (s *Store) Get(id string) (*webauthn.SessionData, []byte, string, bool) {
 	if !ok {
 		return nil, nil, "", false
 	}
-
 	en := el.Value.(*entry)
-
-	// Check expiration
-	if time.Now().After(en.expiresAt) {
-		delete(s.data, id)
-		s.lru.Remove(el)
+	delete(s.data, id)
+	s.lru.Remove(el)
+	if !time.Now().Before(en.expiresAt) {
 		return nil, nil, "", false
 	}
-
-	// Touch LRU
-	s.lru.MoveToFront(el)
-
 	return en.session, en.userID, en.returnURL, true
-}
-
-// Consume removes a challenge from the store (idempotent).
-func (s *Store) Consume(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if el, ok := s.data[id]; ok {
-		delete(s.data, id)
-		s.lru.Remove(el)
-	}
 }
 
 // backgroundCleanup periodically removes expired entries to prevent memory exhaustion.

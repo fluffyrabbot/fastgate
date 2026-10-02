@@ -170,16 +170,12 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("webauthn: parsed response - credID=%x type=%s", parsedResponse.Response.AttestationObject, parsedResponse.Type)
 
-	session, userID, returnURL, ok := h.Store.Get(challengeID)
+	session, userID, returnURL, ok := h.Store.Take(challengeID)
 	if !ok {
 		log.Printf("webauthn: challenge not found in store: %s", challengeID)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "challenge_not_found"})
 		return
 	}
-
-	// SECURITY: Consume challenge immediately to prevent replay attacks
-	// This must happen BEFORE verification to ensure single-use
-	h.Store.Consume(challengeID)
 
 	log.Printf("webauthn: retrieved session - challenge=%s userID=%x", session.Challenge, userID)
 

@@ -389,18 +389,15 @@ func TestStore_ChallengeConsumption(t *testing.T) {
 	}
 
 	// First retrieval should succeed
-	_, _, _, ok := store.Get(challengeID)
+	_, _, _, ok := store.Take(challengeID)
 	if !ok {
-		t.Error("first Get failed")
+		t.Error("first Take failed")
 	}
 
-	// Consume challenge
-	store.Consume(challengeID)
-
 	// Second retrieval should fail (challenge consumed)
-	_, _, _, ok = store.Get(challengeID)
+	_, _, _, ok = store.Take(challengeID)
 	if ok {
-		t.Error("Get succeeded after Consume - challenge was not consumed")
+		t.Error("Take succeeded after consumption - challenge was not consumed")
 	}
 }
 
@@ -420,19 +417,13 @@ func TestStore_ChallengeExpiration(t *testing.T) {
 		t.Fatal("failed to store challenge")
 	}
 
-	// Immediate retrieval should succeed
-	_, _, _, ok := store.Get(challengeID)
-	if !ok {
-		t.Error("immediate Get failed")
-	}
-
 	// Wait for expiration (150ms > 100ms TTL)
 	time.Sleep(150 * time.Millisecond)
 
 	// Retrieval should fail (challenge expired)
-	_, _, _, ok = store.Get(challengeID)
+	_, _, _, ok := store.Take(challengeID)
 	if ok {
-		t.Error("Get succeeded after expiration - challenge should have expired")
+		t.Error("Take succeeded after expiration - challenge should have expired")
 	}
 }
 
@@ -453,14 +444,14 @@ func TestStore_LRUEviction(t *testing.T) {
 	id4 := store.Put(session, userID, "/")
 
 	// id1 should be evicted
-	_, _, _, ok := store.Get(id1)
+	_, _, _, ok := store.Take(id1)
 	if ok {
 		t.Error("id1 should have been evicted but was found")
 	}
 
 	// id2, id3, id4 should still exist
 	for _, id := range []string{id2, id3, id4} {
-		_, _, _, ok := store.Get(id)
+		_, _, _, ok := store.Take(id)
 		if !ok {
 			t.Errorf("id %s should exist but was not found", id)
 		}
@@ -484,9 +475,8 @@ func TestStore_Concurrent(t *testing.T) {
 			defer wg.Done()
 			challengeID := store.Put(session, userID, "/")
 			if challengeID != "" {
-				// Try to get and consume
-				store.Get(challengeID)
-				store.Consume(challengeID)
+				// Atomically take the challenge
+				store.Take(challengeID)
 			}
 		}()
 	}
@@ -497,10 +487,9 @@ func TestStore_Concurrent(t *testing.T) {
 	// If we get here without panic, concurrent access is safe
 }
 
-// TestBeginAndFinishFlow_Integration tests the full workflow
-// Note: This is a partial integration test. Full e2e testing requires
-// actual WebAuthn client implementation, which is in test-webauthn.js
-func TestBeginAndFinishFlow_Integration(t *testing.T) {
+// TestBeginRegistrationStoresSession checks the HTTP begin-to-store contract.
+// Synthetic completion and replay coverage lives in completion_test.go.
+func TestBeginRegistrationStoresSession(t *testing.T) {
 	h := newTestHandler(t)
 
 	// Step 1: Begin registration
@@ -527,13 +516,11 @@ func TestBeginAndFinishFlow_Integration(t *testing.T) {
 	}
 
 	// Step 2: Verify challenge is in store
-	_, _, _, ok := h.Store.Get(beginResp.ChallengeID)
+	_, _, _, ok := h.Store.Take(beginResp.ChallengeID)
 	if !ok {
 		t.Error("challenge not found in store after BeginRegistration")
 	}
 
-	// Note: FinishRegistration requires actual WebAuthn attestation response
-	// which can't be easily mocked. Full testing is done in test-webauthn.js
 }
 
 // TestBackgroundCleanup tests that expired entries are cleaned up
