@@ -1,0 +1,22 @@
+# Only maintained build inputs may enter any image build context.
+**
+!deploy/
+!deploy/*.Dockerfile
+!deploy/origin/
+!deploy/origin/index.html
+!decision-service/
+!decision-service/go.mod
+!decision-service/go.sum
+!decision-service/config.example.yaml
+!decision-service/cmd/
+!decision-service/cmd/**/
+!decision-service/cmd/**/*.go
+!decision-service/internal/
+!decision-service/internal/**/
+!decision-service/internal/**/*.go
+!challenge-page/
+!challenge-page/index.html
+!challenge-page/app.js
+!challenge-page/webauthn-solver.js
+!edge-gateway/
+!edge-gateway/nginx.conf
