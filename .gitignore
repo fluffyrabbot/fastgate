@@ -28,6 +28,11 @@ vendor/
 .DS_Store
 Thumbs.db
 
+# Backups and runtime state
+*.bak
+*.bak[0-9]*
+*.pid
+
 # Logs
 *.log
 /tmp/
