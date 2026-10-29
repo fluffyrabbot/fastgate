@@ -106,3 +106,21 @@ func TestKeyring_TamperedToken(t *testing.T) {
 		t.Error("Verify passed for tampered token")
 	}
 }
+
+func TestNewKeyringAcceptsStandardBase64(t *testing.T) {
+	// `openssl rand -base64 32` output: standard alphabet with padding.
+	key := "q2Hk6v9hY3pW1nC8tR5u/0zA7bE4dG2jL6mN9sV3wQ8="
+	kr, err := NewKeyring("HS256", map[string]string{"v1": key}, "v1", "fastgate", 30)
+	if err != nil {
+		t.Fatalf("NewKeyring: %v", err)
+	}
+	if len(kr.Keys["v1"]) != 32 {
+		t.Fatalf("decoded key length = %d, want 32", len(kr.Keys["v1"]))
+	}
+}
+
+func TestNewKeyringRejectsInvalidBase64(t *testing.T) {
+	if _, err := NewKeyring("HS256", map[string]string{"v1": "not base64!"}, "v1", "fastgate", 30); err == nil {
+		t.Fatal("NewKeyring accepted a key that is not base64")
+	}
+}

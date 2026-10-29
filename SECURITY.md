@@ -23,15 +23,13 @@ openssl rand -base64 32
 openssl rand -base64 32
 ```
 
-Update `config.production.yaml`:
-```yaml
-token:
-  keys:
-    v1: "YOUR_GENERATED_SECRET_HERE"
-
-cluster:
-  secret_key: "YOUR_GENERATED_SECRET_HERE"
+Supply them through the environment rather than writing them into `config.production.yaml`, which keeps both values empty:
+```bash
+export FASTGATE_TOKEN_SECRET="$(openssl rand -base64 32)"    # token.keys[current_kid]
+export FASTGATE_CLUSTER_SECRET="$(openssl rand -base64 32)"  # cluster.secret_key
 ```
+
+Startup fails if either value is empty, or if it matches a key that has been published in this repository. In Kubernetes, `k8s/base/deployment.yaml` reads both from the `fastgate-secrets` Secret.
 
 ### 2. Configure Trusted Proxies (CRITICAL)
 

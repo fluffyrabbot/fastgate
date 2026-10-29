@@ -111,6 +111,16 @@ spec:
           env:
             - name: FASTGATE_CONFIG
               value: /etc/fastgate/config.yaml
+            - name: FASTGATE_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fastgate-secrets
+                  key: token-secret
+            - name: FASTGATE_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fastgate-secrets
+                  key: cluster-secret
             - name: POD_NAME
               valueFrom:
                 fieldRef:

@@ -171,6 +171,7 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
+	applySecretEnv(&cfg)
 
 	// Version defaults and validation
 	if cfg.Version == "" {
@@ -295,6 +296,37 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// Environment variables that supply secrets, so they need not be written
+// into a configuration file.
+const (
+	// TokenSecretEnv replaces the token key for token.current_kid.
+	TokenSecretEnv = "FASTGATE_TOKEN_SECRET"
+	// ClusterSecretEnv replaces cluster.secret_key.
+	ClusterSecretEnv = "FASTGATE_CLUSTER_SECRET"
+)
+
+// publishedKeys are secrets that have appeared in this public repository.
+// They are rejected unless FASTGATE_ALLOW_TEST_KEYS=true.
+var publishedKeys = map[string]string{
+	"dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg": "default test key",
+	"fVh1Q67FXH0UxknQAlD5oY81V7W8Zc/r4kk71fUzL4w=":   "former config.production.yaml example key",
+	"9Oe1WU4wl9ZxOGdniVMQdPBUxA4W1W13Pu1J0LXNy9U=":   "former config.production.yaml example key",
+	"YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=":   "former config.yaml backup key",
+	"n2QPMu8s62OVTZyIPnuHs6kA3sQgO1DWywx0kLfpqDA=":   "former config.yaml backup key",
+}
+
+func applySecretEnv(cfg *Config) {
+	if v := os.Getenv(TokenSecretEnv); v != "" && cfg.Token.CurrentKID != "" {
+		if cfg.Token.Keys == nil {
+			cfg.Token.Keys = make(map[string]string)
+		}
+		cfg.Token.Keys[cfg.Token.CurrentKID] = v
+	}
+	if v := os.Getenv(ClusterSecretEnv); v != "" {
+		cfg.Cluster.SecretKey = v
+	}
+}
+
 func (c *Config) CookieMaxAge() time.Duration {
 	return time.Duration(c.Cookie.MaxAgeSec) * time.Second
 }
@@ -304,16 +336,14 @@ func (c *Config) Validate() error {
 	// Can be bypassed with FASTGATE_ALLOW_TEST_KEYS=true for development/testing only
 	allowTestKeys := os.Getenv("FASTGATE_ALLOW_TEST_KEYS") == "true"
 
-	const testKey = "dGhpc2lzYXRlc3RrZXlkb25vdHVzZWlucHJvZHVjdGlvbg" // base64("thisisatestkeydonotuseinproduction")
-
 	if !allowTestKeys {
-		if c.Cluster.SecretKey == testKey {
-			return errors.New("SECURITY: default test key detected in cluster.secret_key - generate a new secret for production (use 'openssl rand -base64 32')")
+		if name, ok := publishedKeys[c.Cluster.SecretKey]; ok {
+			return fmt.Errorf("SECURITY: %s detected in cluster.secret_key - set %s to a new secret (use 'openssl rand -base64 32')", name, ClusterSecretEnv)
 		}
 
 		for kid, key := range c.Token.Keys {
-			if key == testKey {
-				return fmt.Errorf("SECURITY: default test key detected in token.keys[%s] - generate a new secret for production (use 'openssl rand -base64 32')", kid)
+			if name, ok := publishedKeys[key]; ok {
+				return fmt.Errorf("SECURITY: %s detected in token.keys[%s] - set %s to a new secret (use 'openssl rand -base64 32')", name, kid, TokenSecretEnv)
 			}
 		}
 	} else {
@@ -353,7 +383,7 @@ func (c *Config) Validate() error {
 	// Cluster validation
 	if c.Cluster.Enabled {
 		if c.Cluster.SecretKey == "" {
-			return errors.New("cluster.secret_key required (32-byte base64)")
+			return fmt.Errorf("cluster.secret_key required (32-byte base64) - set it in the config file or through %s", ClusterSecretEnv)
 		}
 	}
 
@@ -399,6 +429,11 @@ func (c *Config) Validate() error {
 	}
 	if _, ok := c.Token.Keys[c.Token.CurrentKID]; !ok {
 		return errors.New("token.current_kid not found in token.keys")
+	}
+	for kid, key := range c.Token.Keys {
+		if key == "" {
+			return fmt.Errorf("token.keys[%s] is empty - set it in the config file or, for token.current_kid, through %s", kid, TokenSecretEnv)
+		}
 	}
 
 	// WebAuthn validation

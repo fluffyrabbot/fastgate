@@ -2,7 +2,9 @@ version: v1
 
 # PRODUCTION CONFIGURATION EXAMPLE
 # ⚠️  BEFORE USING IN PRODUCTION:
-# 1. Generate new secrets: openssl rand -base64 32
+# 1. Supply secrets through the environment, not this file:
+#      FASTGATE_TOKEN_SECRET=$(openssl rand -base64 32)    # token.keys[current_kid]
+#      FASTGATE_CLUSTER_SECRET=$(openssl rand -base64 32)  # cluster.secret_key
 # 2. Configure trusted_proxies for your load balancer
 # 3. Enable TLS and set secure: true for cookies
 # 4. Review all settings for your deployment
@@ -76,9 +78,8 @@ webauthn:
 token:
   alg: "HS256"
   keys:
-    # SECURITY: Generate unique production secret
-    # Command: openssl rand -base64 32
-    v1: "fVh1Q67FXH0UxknQAlD5oY81V7W8Zc/r4kk71fUzL4w="  # REPLACE THIS
+    # SECURITY: Supplied by FASTGATE_TOKEN_SECRET; startup fails if empty
+    v1: ""
   current_kid: "v1"
   issuer: "fastgate"
   skew_sec: 30
@@ -104,10 +105,9 @@ cluster:
   enabled: true
   bind_addr: "0.0.0.0:7946"
 
-  # SECURITY: Generate unique cluster secret for gossip encryption
-  # Command: openssl rand -base64 32
+  # SECURITY: Supplied by FASTGATE_CLUSTER_SECRET; startup fails if empty
   # All nodes in cluster MUST use the same secret
-  secret_key: "9Oe1WU4wl9ZxOGdniVMQdPBUxA4W1W13Pu1J0LXNy9U="  # REPLACE THIS
+  secret_key: ""
 
   # Optional: Multi-node clustering (not yet implemented)
   # advertise: "10.0.1.5:7946"

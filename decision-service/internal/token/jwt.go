@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -40,7 +41,25 @@ var (
 
 // ---- Constructors ----
 
-// NewKeyring loads base64url secrets and prepares a signing/verification keyring.
+// secretEncodings lists the accepted secret encodings: base64url, as before,
+// and standard base64, which is what `openssl rand -base64 32` prints.
+var secretEncodings = []*base64.Encoding{
+	base64.RawURLEncoding,
+	base64.URLEncoding,
+	base64.RawStdEncoding,
+	base64.StdEncoding,
+}
+
+func decodeSecret(s string) ([]byte, error) {
+	for _, enc := range secretEncodings {
+		if dec, err := enc.DecodeString(s); err == nil {
+			return dec, nil
+		}
+	}
+	return nil, errors.New("not valid base64 or base64url")
+}
+
+// NewKeyring loads base64 secrets and prepares a signing/verification keyring.
 // alg must be an HMAC algorithm in MVP ("HS256" recommended).
 func NewKeyring(alg string, keys map[string]string, current, iss string, skew int) (*Keyring, error) {
 	// Guard against "none" or unsupported algs; parser will also enforce.
@@ -58,9 +77,9 @@ func NewKeyring(alg string, keys map[string]string, current, iss string, skew in
 		MaxTTL: 24 * time.Hour,
 	}
 	for kid, b64 := range keys {
-		dec, err := base64.RawURLEncoding.DecodeString(b64)
+		dec, err := decodeSecret(b64)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("signing key %q: %w", kid, err)
 		}
 		if len(dec) < 16 {
 			return nil, errors.New("signing key too short; need >=16 bytes")
